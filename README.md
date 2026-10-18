@@ -14,6 +14,7 @@ I made this for my own TV. It just skips the boring bits so playback keeps going
 * Seeking back on purpose shows a "Skip intro" button instead of skipping again.
 * Remote keys are never blocked. OK on the button skips, everything else works as normal.
 * Settings in Stremio: on/off, anime on/off, Auto or Manual, recaps on/off.
+* Hide spoilers: optional switch in Settings Interface that hides thumbnails and synopses for unwatched episodes.
 
 Tested on Stremio 1.6.12 (com.stremio.one, Android TV).
 
