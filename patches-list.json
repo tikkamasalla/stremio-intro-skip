@@ -1,0 +1,42 @@
+{
+  "NOTE": "Do NOT manually edit this file. This file is automatically updated when semantic release (release.yml) runs. Manually editing this file can break your releases and break third party tools that use this file.",
+  "version": "1.0.0",
+  "patches": [
+    {
+      "name": "Intro Skip",
+      "description": "Adds intro and recap skip controls for TV shows, movies and anime in Stremio.\n\nIntro Skip v1.0.0\nRepository: https://github.com/tikkamasalla/stremio-intro-skip",
+      "default": true,
+      "dependencies": [],
+      "compatiblePackages": [
+        {
+          "packageName": "com.stremio.one",
+          "name": "Stremio",
+          "description": null,
+          "apkFileType": "APK",
+          "appIconColor": "#5B67F1",
+          "signatures": null,
+          "targets": [
+            {
+              "version": null,
+              "versionCodes": null,
+              "isExperimental": true,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": [
+        {
+          "key": "debug",
+          "title": "Enable debug mode",
+          "description": "Opens the Intro Skip log when playback starts, to check the title, season, episode and API calls.",
+          "required": false,
+          "type": "kotlin.Boolean",
+          "default": false,
+          "values": null
+        }
+      ]
+    }
+  ]
+}
