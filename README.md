@@ -32,6 +32,14 @@ Tested on Stremio 1.6.12 (com.stremio.one, Android TV).
 * Online timings snap to chapter edges within 15 s. Weak "Intro" chapter names only count when AniSkip or IntroDB agrees within 15 s, or when neither has anything for the episode.
 * If the exact seek fails it falls back to a normal seek.
 
+## Vimu support
+
+The same bundle also carries an "Intro Skip (Vimu)" patch for Vimu 12.00 (net.gtvbox.videoplayer).
+
+It skips intros and recaps the same way: file chapter markers first, then AniSkip for anime and IntroDB for shows and movies. The IntroDB step needs no API key. It uses an IMDb id from the playing item when one is present, else a keyless Cinemeta title lookup that is remembered for 60 days. The patch also includes playback fixes from the same mod: deferred prepare for the tunneling crash on cold start, media session release on exit, seek timer cancel, and a 2 byte fix in libmediaengine.so for a native crash on rapid seeks. A "Skip intros" switch is added to Vimu Settings.
+
+Patch your own copy of the Vimu 12.00 APK. Copies that were already modified by someone else may carry extra checks that this patch does not remove, so test on your own copy.
+
 ## Build locally
 
 ```bash
