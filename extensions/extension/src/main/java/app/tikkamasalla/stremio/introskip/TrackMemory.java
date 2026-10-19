@@ -11,6 +11,8 @@ import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.TrackSelectionParameters;
 import androidx.media3.common.Tracks;
 
+import app.tikkamasalla.stremio.subs.SdhLabels;
+
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.ref.WeakReference;
@@ -285,8 +287,13 @@ public final class TrackMemory {
 
     private static TrackSelectionOverride findSub(Tracks tracks, String language, String kind) {
         try {
-            TrackSelectionOverride fallback = null;
-            TrackSelectionOverride kindMatch = null;
+            // Bitmap tracks (PGS, VobSub, DVB) are drawn outline-only by Stremio's player for some
+            // releases, so a text track wins over a bitmap one of the same kind; the kind match
+            // still comes first, and a bitmap track is used only when no text track fits.
+            TrackSelectionOverride textKind = null;
+            TrackSelectionOverride bitmapKind = null;
+            TrackSelectionOverride textAny = null;
+            TrackSelectionOverride bitmapAny = null;
             for (Tracks.Group group : tracks.getGroups()) {
                 if (group.getType() != C.TRACK_TYPE_TEXT) continue;
                 for (int i = 0; i < group.length; i++) {
@@ -296,15 +303,20 @@ public final class TrackMemory {
                     if (isSdh(format.label) || isSdhId(format.id)) continue;
                     TrackSelectionOverride candidate =
                             new TrackSelectionOverride(group.getMediaTrackGroup(), i);
-                    if (fallback == null) fallback = candidate;
-                    if (kindOf(format.label).equals(kind)) {
-                        kindMatch = candidate;
-                        break;
+                    boolean bitmap = SdhLabels.isBitmapMime(format.sampleMimeType);
+                    boolean kindOk = kindOf(format.label).equals(kind);
+                    if (bitmap) {
+                        if (bitmapAny == null) bitmapAny = candidate;
+                        if (kindOk && bitmapKind == null) bitmapKind = candidate;
+                    } else {
+                        if (textAny == null) textAny = candidate;
+                        if (kindOk && textKind == null) textKind = candidate;
                     }
                 }
-                if (kindMatch != null) break;
             }
-            return kindMatch != null ? kindMatch : fallback;
+            if (textKind != null) return textKind;
+            if (bitmapKind != null) return bitmapKind;
+            return textAny != null ? textAny : bitmapAny;
         } catch (Throwable ignored) {
             return null;
         }

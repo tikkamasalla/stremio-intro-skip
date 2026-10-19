@@ -307,6 +307,18 @@ public final class SdhLabels {
         return KIND_FULL;
     }
 
+    /**
+     * True for bitmap subtitle formats (PGS, VobSub, DVB). Stremio's player draws some of them
+     * outline-only, so text formats (SRT, ASS/SSA, VTT, TTML, ...) are preferred over them.
+     * An unknown or missing mime type counts as text.
+     */
+    public static boolean isBitmapMime(String mime) {
+        if (mime == null) return false;
+        String v = mime.toLowerCase(Locale.US);
+        return v.contains("pgs") || v.contains("vobsub") || v.contains("dvbsub")
+                || v.contains("dvb-sub") || v.contains("dvb_sub") || v.contains("xsub");
+    }
+
     /** Normalize a subtitle language for comparison: eng and en both become en. */
     public static String normLang(String lang) {
         if (lang == null) return "";

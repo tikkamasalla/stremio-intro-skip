@@ -153,6 +153,8 @@ public final class SdhAvoid {
         String lang;
         String label;
         int kind;
+        /** Bitmap track (PGS, VobSub, DVB): ranked after a text track of the same kind. */
+        boolean bitmap;
         boolean selected;
     }
 
@@ -297,6 +299,7 @@ public final class SdhAvoid {
                         entry.label = format.label;
                         entry.kind = SdhLabels.kindOf(format.label, format.roleFlags,
                                 format.selectionFlags);
+                        entry.bitmap = SdhLabels.isBitmapMime(format.sampleMimeType);
                         try {
                             entry.selected = group.isTrackSelected(i);
                         } catch (Throwable ignored) {
@@ -369,6 +372,7 @@ public final class SdhAvoid {
                 @Override
                 public int compare(Entry a, Entry b) {
                     if (a.kind != b.kind) return a.kind - b.kind;
+                    if (a.bitmap != b.bitmap) return a.bitmap ? 1 : -1;
                     return a.ordinal - b.ordinal;
                 }
             });
@@ -405,6 +409,7 @@ public final class SdhAvoid {
                     if (sb.length() > 0) sb.append("; ");
                     sb.append(entry.selected ? "*" : "").append(entry.id).append(" ")
                             .append(entry.lang).append(" kind=").append(entry.kind)
+                            .append(entry.bitmap ? " bitmap" : "")
                             .append(" '").append(entry.label).append("'");
                 }
                 String line = sb.toString();
@@ -478,6 +483,7 @@ public final class SdhAvoid {
                 @Override
                 public int compare(Entry a, Entry b) {
                     if (a.kind != b.kind) return a.kind - b.kind;
+                    if (a.bitmap != b.bitmap) return a.bitmap ? 1 : -1;
                     return a.ordinal - b.ordinal;
                 }
             });
