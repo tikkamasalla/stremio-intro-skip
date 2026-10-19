@@ -2097,9 +2097,9 @@ public final class IntroSkip implements Runnable {
             }
             return;
         }
-        subTries++;
         int count = internalSubCount(p);
-        if (count < 0) return; // track list not parsed yet
+        if (count < 0) return; // track list not parsed yet: does not use up a try
+        subTries++;
         if (count == 0) {
             subApplied = true;
             Log.i(TAG, "Subtitle: file has no subtitle tracks");
@@ -2239,6 +2239,8 @@ public final class IntroSkip implements Runnable {
         throw new NoSuchFieldException(name);
     }
 
+    private static final boolean UNNAMED_CHAPTER_HEURISTIC = false;
+
     private void readChapters(e p, int duration) {
         long[] starts = p.E();
         if (starts == null || starts.length == 0) return;
@@ -2286,7 +2288,10 @@ public final class IntroSkip implements Runnable {
         //    qualify (e.g. an 85 s cold open before a 90 s OP), take the one closest to 90 s,
         //    the usual TV opening length; ties go to the earlier one. Checked whenever no
         //    non-recap intro chapter was named, so a named recap never hides an unnamed OP.
-        if (!hasIntroSeg) {
+        // Off: scene-split chapters of documentaries and specials also have this shape, and
+        // skipping real content is worse than missing an intro. Online timings (AniSkip, IntroDB)
+        // and named chapters still apply.
+        if (!hasIntroSeg && UNNAMED_CHAPTER_HEURISTIC) {
             int best = -1;
             long bestDelta = Long.MAX_VALUE;
             for (int i = 0; i < n; i++) {

@@ -35,8 +35,10 @@ val vimuResultPatch = bytecodePatch(
                 "start position anchor",
                 { it.opcode == Opcode.CONST_STRING && it.referenceStringContains("startfrom") },
             )
+            // After the const-string: a label sits on it (the "airplay" branch ends there), so code
+            // inserted before it would run only for airplay launches. v1 and p0 are untouched.
             addInstructions(
-                anchor,
+                anchor + 1,
                 """
                 invoke-static {v1}, $VIMU_RESULT->normalize(Landroid/os/Bundle;)V
                 invoke-static {p0, v1}, $INTRO_SKIP->capture(Ljava/lang/Object;Landroid/os/Bundle;)V
