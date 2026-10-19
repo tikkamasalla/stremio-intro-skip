@@ -54,14 +54,35 @@ Patch your own copy of the Vimu 12.00 APK. Copies that were already modified by 
 The bundle lands in `patches/build/libs/patches-*.mpp`. Apply it with Morphe Desktop.
 
 <!-- PATCHES_START -->
-> **[v1.0.0](https://github.com/tikkamasalla/stremio-intro-skip/releases/tag/v1.0.0)**&nbsp;&nbsp;•&nbsp;&nbsp;`main`&nbsp;&nbsp;•&nbsp;&nbsp;1 patches total
+> **[v1.1.0](https://github.com/tikkamasalla/stremio-intro-skip/releases/tag/v1.1.0)**&nbsp;&nbsp;•&nbsp;&nbsp;`main`&nbsp;&nbsp;•&nbsp;&nbsp;8 patches total
 <details open>
-<summary>📦 Stremio&nbsp;&nbsp;•&nbsp;&nbsp;1 patch</summary>
+<summary>📦 Stremio&nbsp;&nbsp;•&nbsp;&nbsp;4 patches</summary>
 <br>
 
 | 💊&nbsp;Patch | 📜&nbsp;Description | ⚙️&nbsp;Options |
 |----------|----------------|-----------|
-| [Intro Skip](#intro-skip) | Adds intro and recap skip controls for TV shows and anime in Stremio.<br><br>Intro Skip v1.0.0<br>Repository: https://github.com/tikkamasalla/stremio-intro-skip | • Enable debug mode |
+| [External player progress](#external-player-progress) | Saves watch progress in Stremio when playing in an external player, and starts the player at the saved position. |  |
+| [External player progress manifest](#external-player-progress-manifest) | Declares the keep-alive service for External player progress. Runs with that patch. |  |
+| [Hide spoilers](#hide-spoilers) | Hides thumbnails and synopses for unwatched episodes in Stremio.<br><br>Hide spoilers v1.0.0<br>Repository: https://github.com/tikkamasalla/stremio-intro-skip |  |
+| [Intro Skip](#intro-skip) | Adds intro and recap skip controls for TV shows, movies and anime in Stremio.<br><br>Intro Skip v1.0.0<br>Repository: https://github.com/tikkamasalla/stremio-intro-skip | • Enable debug mode |
+
+</details>
+
+<details open>
+<summary>📦 Vimu&nbsp;&nbsp;•&nbsp;&nbsp;4 patches</summary>
+<br>
+
+**🎯 Supported versions:**
+
+| 🧪&nbsp;12.00 ST | 🧪&nbsp;12.00 |
+| :---: | :---: |
+
+| 💊&nbsp;Patch | 📜&nbsp;Description | ⚙️&nbsp;Options |
+|----------|----------------|-----------|
+| [External player result (Vimu)](#external-player-result-vimu) | Returns position and duration from Vimu so Stremio saves progress. Runs with the Intro Skip (Vimu) patch. |  |
+| [Intro Skip (Vimu)](#intro-skip-vimu) | Adds intro and recap skip for TV shows, movies and anime in Vimu.<br><br>Intro Skip v1.0.0<br>Repository: https://github.com/tikkamasalla/stremio-intro-skip |  |
+| [Intro Skip native fix (Vimu)](#intro-skip-native-fix-vimu) | Fixes a native crash on rapid seeks in the Vimu media engine. Runs with the Intro Skip (Vimu) patch. |  |
+| [Intro Skip settings row (Vimu)](#intro-skip-settings-row-vimu) | Adds the Intro Skip settings to Vimu Settings. Runs with the Intro Skip (Vimu) patch. |  |
 
 </details>
 
