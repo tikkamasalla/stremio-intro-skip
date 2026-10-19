@@ -1672,6 +1672,10 @@ public final class IntroSkipBridge {
     private static List<Segment> chapterSegments(List<MkvChapters.Chapter> chapters, boolean weak) {
         List<Segment> out = new ArrayList<>();
         if (chapters == null) return out;
+        double runtime = 0;
+        for (MkvChapters.Chapter c : chapters) {
+            if (c != null && c.end > runtime) runtime = c.end;
+        }
         for (MkvChapters.Chapter chapter : chapters) {
             double length = chapter.end - chapter.start;
             // A label, not a scene description ("Mike Takes His Leave of the Crew, Opening Credits").
@@ -1679,11 +1683,15 @@ public final class IntroSkipBridge {
                     || normTitle(chapter.name).split(" ").length > 4) continue;
             boolean intro = weak ? CHAPTER_WEAK_INTRO.matcher(chapter.name).find()
                     && !CHAPTER_INTRO.matcher(chapter.name).find() : CHAPTER_INTRO.matcher(chapter.name).find();
+            // "Opening Credits" or an early "Credits" chapter is the start of the episode, not its end.
+            String lower = chapter.name.toLowerCase(Locale.ROOT);
+            boolean allowCredits = !(lower.contains("opening") || lower.contains("main title")
+                    || (lower.contains("credits") && (runtime <= 0 || chapter.start < runtime * 0.25)));
             if (intro && length >= 15 && length <= 240) {
                 out.add(new Segment(chapter.start, chapter.end, "OP", "chapter \"" + chapter.name + "\""));
             } else if (!weak && CHAPTER_RECAP.matcher(chapter.name).find() && length >= 10 && length <= 360) {
                 out.add(new Segment(chapter.start, chapter.end, "recap", "chapter \"" + chapter.name + "\""));
-            } else if (!weak && CHAPTER_CREDITS.matcher(chapter.name).find() && length >= 15 && length <= 480) {
+            } else if (!weak && allowCredits && CHAPTER_CREDITS.matcher(chapter.name).find() && length >= 15 && length <= 480) {
                 out.add(new Segment(chapter.start, chapter.end, "credits", "chapter \"" + chapter.name + "\""));
             } else if (!weak && CHAPTER_PREVIEW.matcher(chapter.name).find() && length >= 10 && length <= 300) {
                 out.add(new Segment(chapter.start, chapter.end, "preview", "chapter \"" + chapter.name + "\""));
