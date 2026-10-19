@@ -123,11 +123,11 @@ public final class IntroSkip implements Runnable {
     private static final Pattern SXXEYY = Pattern.compile(
             "(?i)(?:^|[^a-z0-9])S(\\d{1,2})[ ._-]*E(\\d{1,4})(?:v\\d+)?(?=$|[^a-z0-9])");
     private static final Pattern SXX_DASH_EP = Pattern.compile(
-            "(?i)(?:^|[^a-z0-9])(?:S|Season\\s*)(\\d{1,2})\\s*[-–—]+\\s*(?:Ep(?:isode)?\\.?\\s*)?(\\d{1,4})(?:v\\d+)?(?=$|[^a-z0-9])");
+            "(?i)(?:^|[^a-z0-9])(?:S|Season\\s*)(\\d{1,2})\\s*[-\u2013\u2014]+\\s*(?:Ep(?:isode)?\\.?\\s*)?(\\d{1,4})(?:v\\d+)?(?=$|[^a-z0-9])");
     private static final Pattern NXNN = Pattern.compile(
             "(?i)(?:^|[^a-z0-9])(\\d{1,2})x(\\d{2,3})(?=$|[^a-z0-9])");
     private static final Pattern ANIME_DASH_EP = Pattern.compile(
-            "(?i)^(.+?)\\s+[-–—]+\\s*(?:Ep(?:isode)?\\.?\\s*)?(\\d{1,4})(?:v\\d+)?(?:\\s*[-–—]+\\s*[^\\d].*)?$");
+            "(?i)^(.+?)\\s+[-\u2013\u2014]+\\s*(?:Ep(?:isode)?\\.?\\s*)?(\\d{1,4})(?:v\\d+)?(?:\\s*[-\u2013\u2014]+\\s*[^\\d].*)?$");
     private static final Pattern EXPLICIT_EP = Pattern.compile(
             "(?i)^(.+?)[\\s._-]+(?:Episode|Ep\\.?|E)\\s*(\\d{1,4})(?:v\\d+)?(?:\\b.*)?$");
     private static final Pattern TRAILING_EP = Pattern.compile(
@@ -1026,7 +1026,7 @@ public final class IntroSkip implements Runnable {
             String spaced = strippedTech.replace('_', ' ');
             // Match the LAST " - <ep>" by using greedy (.+) on the left
             Matcher animeDash = Pattern.compile(
-                    "(?i)^(.+)\\s+[-–—]+\\s*(?:Ep(?:isode)?\\.?\\s*)?(\\d{1,4})(?:v\\d+)?(?:\\s*[-–—]+\\s*[^\\d].*)?$")
+                    "(?i)^(.+)\\s+[-\u2013\u2014]+\\s*(?:Ep(?:isode)?\\.?\\s*)?(\\d{1,4})(?:v\\d+)?(?:\\s*[-\u2013\u2014]+\\s*[^\\d].*)?$")
                     .matcher(spaced);
             if (!animeDash.matches()) {
                 animeDash = ANIME_DASH_EP.matcher(spaced);
@@ -1093,8 +1093,8 @@ public final class IntroSkip implements Runnable {
             }
         }
 
-        clean = clean.replaceAll("^\\s*[-–—:]+\\s*", "")
-                .replaceAll("\\s*[-–—:]+\\s*$", "")
+        clean = clean.replaceAll("^\\s*[-\u2013\u2014:]+\\s*", "")
+                .replaceAll("\\s*[-\u2013\u2014:]+\\s*$", "")
                 .replaceAll("\\s+", " ")
                 .trim();
         if (clean.length() < 2 || !clean.matches(".*\\p{L}.*")) return null;
