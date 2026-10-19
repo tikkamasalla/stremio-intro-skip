@@ -247,6 +247,7 @@ public final class IntroSkipBridge {
         private boolean armed;
         private long lastOtherKeyAt;
         private Segment pillSegment;
+        private boolean nextPill;
         private long noticeUntil;
         private Window.Callback originalCallback;
         private KeyCallback keyCallback;
@@ -338,6 +339,7 @@ public final class IntroSkipBridge {
             landingCheckAt = 0;
             exoLookedUp = false;
             exoInternal = null;
+            nextPill = false;
             hidePill(false);
         }
 
@@ -495,8 +497,8 @@ public final class IntroSkipBridge {
 
             inheritSeek = false;
             Integer jumpCount = segment == null ? null : jumpSkips.get(segment.key());
-            boolean manualMode = IntroSkipPrefs.isManualMode(activity);
-            boolean autoPending = segment != null && !currentBySeek && !manualMode
+            boolean autoWanted = segment != null && wantsAuto(segment);
+            boolean autoPending = segment != null && !currentBySeek && autoWanted
                     && !wasSkipped(segment)
                     && (!currentByJump || jumpCount == null || jumpCount < 3);
             if (autoPending && playing) {
@@ -508,8 +510,12 @@ public final class IntroSkipBridge {
             if (segment == null && playing) {
                 // 200 ms polling would show up to 0.2 s of the OP: re-check right at its start.
                 boolean recaps = IntroSkipPrefs.isRecapsEnabled(activity);
+                boolean creditsOff = IntroSkipPrefs.isCreditsOff(activity);
+                boolean previews = IntroSkipPrefs.isPreviewsEnabled(activity);
                 for (Segment next : segments) {
                     if (!recaps && next.isRecap()) continue;
+                    if (creditsOff && next.isCredits()) continue;
+                    if (!previews && next.isPreview()) continue;
                     double ahead = next.startSeconds - pos;
                     if (ahead > 0 && ahead <= POLL_MS / 1000.0 + 0.05) {
                         MAIN.removeCallbacks(precise);
@@ -517,17 +523,44 @@ public final class IntroSkipBridge {
                         break;
                     }
                 }
+                if (maybeShowNext(pos, durationMs, playWhenReady, now)) {
+                    updatePillPosition();
+                    return;
+                }
             }
 
             if (segment != null && playWhenReady && !autoPending) {
+                nextPill = false;
                 if (pillSegment != segment || noticeUntil != 0) showButton(segment);
                 refreshArmed(now);
             } else if (noticeUntil != 0) {
                 if (now > noticeUntil) hidePill(true);
-            } else if (pillShown) {
+            } else if (pillShown && !nextPill) {
                 hidePill(true);
+            } else if (!pillShown && segment == null) {
+                maybeShowNext(pos, durationMs, playWhenReady, now);
             }
             updatePillPosition();
+        }
+
+        private boolean maybeShowNext(double pos, long durationMs, boolean playWhenReady, long now) {
+            try {
+                if (movie || !playWhenReady || durationMs <= 0) return false;
+                double remaining = durationMs / 1000.0 - pos;
+                if (remaining < 0 || remaining > 90.0) {
+                    if (nextPill) hidePill(true);
+                    return false;
+                }
+                if (pillShown && nextPill) {
+                    refreshArmed(now);
+                    return true;
+                }
+                showNextEpisode();
+                refreshArmed(now);
+                return true;
+            } catch (Throwable ignored) {
+                return false;
+            }
         }
 
         /** One automatic skip per segment and media: a rewind into it shows the button instead. */
@@ -537,11 +570,20 @@ public final class IntroSkipBridge {
 
         private Segment segmentAt(double pos) {
             boolean recaps = IntroSkipPrefs.isRecapsEnabled(activity);
+            boolean creditsOff = IntroSkipPrefs.isCreditsOff(activity);
+            boolean previews = IntroSkipPrefs.isPreviewsEnabled(activity);
             for (Segment segment : segments) {
                 if (!recaps && segment.isRecap()) continue;
+                if (creditsOff && segment.isCredits()) continue;
+                if (!previews && segment.isPreview()) continue;
                 if (pos >= segment.startSeconds && pos < segment.endSeconds - 0.4) return segment;
             }
             return null;
+        }
+
+        private boolean wantsAuto(Segment segment) {
+            if (segment.isCredits()) return IntroSkipPrefs.isCreditsAuto(activity);
+            return !IntroSkipPrefs.isManualMode(activity);
         }
 
         private void skip(Segment segment, boolean automatic, double pos, long durationMs) {
@@ -826,9 +868,11 @@ public final class IntroSkipBridge {
         }
 
         /**
-         * Final intro/recap windows: a chapter NAMED opening/intro/recap is exact and wins;
-         * otherwise AniSkip/IntroDB is snapped onto chapter boundaries within 15 s; otherwise
-         * the online timing is used as is. Online timings wait up to 6 s for the chapters.
+         * Final intro/recap/credits/preview windows: a chapter NAMED opening/intro/recap/credits
+         * is exact and wins; otherwise AniSkip/IntroDB is snapped onto chapter boundaries
+         * within 15 s; otherwise the online timing is used as is. Online timings wait up to
+         * 6 s for the chapters. Credits jump to the end of the credits segment so
+         * after-credits scenes still play.
          */
         private void combine(long now) {
             boolean waitChapters = chaptersRequested && !chaptersDone && now - chaptersStartedAt < 6000L;
@@ -841,7 +885,8 @@ public final class IntroSkipBridge {
                 for (Segment weak : chapterSegments(chapters, true)) {
                     boolean confirmed = online.isEmpty();
                     for (Segment o : online) {
-                        if (!o.isRecap() && Math.abs(o.startSeconds - weak.startSeconds) <= 15.0
+                        if (!o.isRecap() && !o.isCredits() && !o.isPreview()
+                                && Math.abs(o.startSeconds - weak.startSeconds) <= 15.0
                                 && Math.abs(o.endSeconds - weak.endSeconds) <= 15.0) confirmed = true;
                     }
                     if (confirmed) named.add(weak);
@@ -850,14 +895,23 @@ public final class IntroSkipBridge {
             if (named.isEmpty() && (online == null || waitChapters)) return;
             boolean namedIntro = false;
             boolean namedRecap = false;
+            boolean namedCredits = false;
+            boolean namedPreview = false;
             for (Segment segment : named) {
                 if (segment.isRecap()) namedRecap = true;
+                else if (segment.isCredits()) namedCredits = true;
+                else if (segment.isPreview()) namedPreview = true;
                 else namedIntro = true;
             }
             List<Segment> out = new ArrayList<>(named);
             if (online != null && !waitChapters) {
                 for (Segment segment : online) {
-                    if (segment.isRecap() ? namedRecap : namedIntro) continue;
+                    boolean covered;
+                    if (segment.isRecap()) covered = namedRecap;
+                    else if (segment.isCredits()) covered = namedCredits;
+                    else if (segment.isPreview()) covered = namedPreview;
+                    else covered = namedIntro;
+                    if (covered) continue;
                     Segment snapped = snap(segment, chapters);
                     if (!overlaps(out, snapped.startSeconds, snapped.endSeconds)) out.add(snapped);
                 }
@@ -937,6 +991,7 @@ public final class IntroSkipBridge {
             ensurePill();
             if (pill == null) return;
             pillSegment = segment;
+            nextPill = false;
             noticeUntil = 0;
             armed = !controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L;
             pill.setText(segment.buttonText());
@@ -945,8 +1000,111 @@ public final class IntroSkipBridge {
             log("Button shown: " + segment.buttonText() + (armed ? " (OK = skip)" : " (OK to player)"));
         }
 
+        private void showNextEpisode() {
+            ensurePill();
+            if (pill == null) return;
+            pillSegment = null;
+            nextPill = true;
+            noticeUntil = 0;
+            armed = !controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L;
+            pill.setText("Next episode (OK)");
+            styleArmed(armed);
+            fadeIn();
+            log("Button shown: Next episode (OK)" + (armed ? " (OK = next)" : " (OK to player)"));
+        }
+
+        private void playNextEpisode() {
+            try {
+                if (movie) {
+                    log("Next episode ignored: movie");
+                    return;
+                }
+                Object frag = resolveFragment();
+                if (frag == null) {
+                    log("Next episode failed: no fragment");
+                    return;
+                }
+                try {
+                    java.lang.reflect.Method direct = frag.getClass().getDeclaredMethod("navigateToNextVideo");
+                    direct.setAccessible(true);
+                    direct.invoke(frag);
+                    log("Next episode: navigateToNextVideo");
+                    return;
+                } catch (Throwable ignored) {
+                    // Fall through to binge/next lookup.
+                }
+                Object video = nextVideoOf(frag);
+                if (video == null) {
+                    log("Next episode failed: no next video");
+                    return;
+                }
+                java.lang.reflect.Method nav = null;
+                try {
+                    nav = frag.getClass().getMethod("navigateToVideo", video.getClass());
+                } catch (Throwable ignored) {
+                    for (java.lang.reflect.Method m : frag.getClass().getMethods()) {
+                        if ("navigateToVideo".equals(m.getName()) && m.getParameterTypes().length == 1) {
+                            nav = m;
+                            break;
+                        }
+                    }
+                }
+                if (nav == null) {
+                    log("Next episode failed: no navigateToVideo");
+                    return;
+                }
+                try {
+                    Object vm = frag.getClass().getMethod("getViewModel").invoke(frag);
+                    Object flow = vm.getClass().getMethod("getState").invoke(vm);
+                    Object st = flow.getClass().getMethod("getValue").invoke(flow);
+                    try {
+                        st.getClass().getMethod("getNextVideo");
+                        vm.getClass().getMethod("onStateChange", Class.forName(
+                                "com.stremio.common.viewmodels.state.VideoPlaybackState$NextVideo"));
+                    } catch (Throwable ignored2) {
+                        // State event is optional; navigation still plays next.
+                    }
+                } catch (Throwable ignored) {
+                    // Navigation without the state event still works.
+                }
+                nav.invoke(frag, video);
+                log("Next episode: navigateToVideo");
+            } catch (Throwable error) {
+                log("ERROR next episode: " + error);
+            }
+        }
+
+        private Object resolveFragment() {
+            try {
+                if (fragment != null && !(fragment instanceof Session)) return fragment;
+                if (anchor == null) return null;
+                Class<?> manager = Class.forName("androidx.fragment.app.FragmentManager",
+                        false, activity.getClassLoader());
+                return manager.getMethod("findFragment", View.class).invoke(null, anchor);
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+
+        private Object nextVideoOf(Object frag) {
+            try {
+                Object vm = frag.getClass().getMethod("getViewModel").invoke(frag);
+                Object flow = vm.getClass().getMethod("getState").invoke(vm);
+                Object st = flow.getClass().getMethod("getValue").invoke(flow);
+                try {
+                    Object binge = st.getClass().getMethod("getBingeVideo").invoke(st);
+                    if (binge != null) return binge;
+                } catch (Throwable ignored) {
+                    // Try manual next below.
+                }
+                return st.getClass().getMethod("getNextVideo").invoke(st);
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+
         private void refreshArmed(long now) {
-            boolean next = pillSegment != null && !controlsVisible() && now - lastOtherKeyAt > 600L;
+            boolean next = (pillSegment != null || nextPill) && !controlsVisible() && now - lastOtherKeyAt > 600L;
             if (next != armed) {
                 armed = next;
                 styleArmed(armed);
@@ -958,6 +1116,7 @@ public final class IntroSkipBridge {
             ensurePill();
             if (pill == null) return;
             pillSegment = null;
+            nextPill = false;
             armed = false;
             noticeUntil = SystemClock.uptimeMillis() + 2200L;
             pill.setText(text);
@@ -978,6 +1137,7 @@ public final class IntroSkipBridge {
         private void hidePill(boolean animate) {
             armed = false;
             pillSegment = null;
+            nextPill = false;
             noticeUntil = 0;
             if (pill == null || !pillShown) return;
             pillShown = false;
@@ -1045,7 +1205,7 @@ public final class IntroSkipBridge {
             if (event.getAction() == KeyEvent.ACTION_DOWN && isSeekKey(event.getKeyCode())) {
                 lastSeekKeyAt = SystemClock.uptimeMillis();
             }
-            if (!pillShown || pillSegment == null) return false;
+            if (!pillShown || (pillSegment == null && !nextPill)) return false;
             if (!isOkKey(event.getKeyCode())) {
                 if (event.getAction() == KeyEvent.ACTION_DOWN) {
                     // Any other key gives OK back to the player controls it just woke up.
@@ -1059,6 +1219,11 @@ public final class IntroSkipBridge {
             }
             if (!armed) return false;
             if (event.getAction() == KeyEvent.ACTION_UP) {
+                if (nextPill) {
+                    hidePill(false);
+                    playNextEpisode();
+                    return true;
+                }
                 Segment segment = pillSegment;
                 double pos = 0;
                 long duration = -1;
@@ -1489,10 +1654,14 @@ public final class IntroSkipBridge {
             "(?iu)(?:^|[^\\p{L}])(?:intro|introduction)(?:$|[^\\p{L}])");
     private static final Pattern CHAPTER_RECAP = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:recap|previously|"
             + "story so far|r[ée]sum[ée]|resumen|recapitula[çc][ãa]o|r[üu]ckblick|zusammenfassung)(?:$|[^\\p{L}])|あらすじ");
-    private static final Pattern CHAPTER_NOT = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:ending|outro|end credits|"
-            + "preview|next episode|encerramento|eyecatch)(?:$|[^\\p{L}])");
+    private static final Pattern CHAPTER_CREDITS = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:ed\\d*|ending|"
+            + "outro|credits|end credits|ending credits|closing credits|end theme|ending theme|"
+            + "encerramento|generique de fin|abspann)(?:$|[^\\p{L}])|エンディング");
+    private static final Pattern CHAPTER_PREVIEW = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:preview|"
+            + "next episode|trailer|apercu|vorschau)(?:$|[^\\p{L}])|予告");
+    private static final Pattern CHAPTER_NOT = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:eyecatch)(?:$|[^\\p{L}])");
 
-    /** Chapters whose NAME says opening/intro/recap: their exact start/end. */
+    /** Chapters whose NAME says opening/intro/recap/credits/preview: their exact start/end. */
     private static List<Segment> chapterSegments(List<MkvChapters.Chapter> chapters, boolean weak) {
         List<Segment> out = new ArrayList<>();
         if (chapters == null) return out;
@@ -1507,6 +1676,10 @@ public final class IntroSkipBridge {
                 out.add(new Segment(chapter.start, chapter.end, "OP", "chapter \"" + chapter.name + "\""));
             } else if (!weak && CHAPTER_RECAP.matcher(chapter.name).find() && length >= 10 && length <= 360) {
                 out.add(new Segment(chapter.start, chapter.end, "recap", "chapter \"" + chapter.name + "\""));
+            } else if (!weak && CHAPTER_CREDITS.matcher(chapter.name).find() && length >= 15 && length <= 480) {
+                out.add(new Segment(chapter.start, chapter.end, "credits", "chapter \"" + chapter.name + "\""));
+            } else if (!weak && CHAPTER_PREVIEW.matcher(chapter.name).find() && length >= 10 && length <= 300) {
+                out.add(new Segment(chapter.start, chapter.end, "preview", "chapter \"" + chapter.name + "\""));
             }
         }
         return out;
@@ -1548,7 +1721,7 @@ public final class IntroSkipBridge {
     private static final class Segment {
         final double startSeconds;
         final double endSeconds;
-        /** "OP" (opening / intro) or "recap": the only kinds this mod skips. */
+        /** "OP", "recap", "credits" or "preview". */
         final String label;
         final String source;
 
@@ -1563,16 +1736,30 @@ public final class IntroSkipBridge {
             return "recap".equals(label);
         }
 
+        boolean isCredits() {
+            return "credits".equals(label);
+        }
+
+        boolean isPreview() {
+            return "preview".equals(label);
+        }
+
         String key() {
             return label + "@" + startSeconds + "-" + endSeconds;
         }
 
         String buttonText() {
-            return isRecap() ? "Skip recap" : "Skip intro";
+            if (isRecap()) return "Skip recap";
+            if (isCredits()) return "Skip credits";
+            if (isPreview()) return "Skip preview";
+            return "Skip intro";
         }
 
         String skippedText() {
-            return isRecap() ? "Recap skipped" : "Intro skipped";
+            if (isRecap()) return "Recap skipped";
+            if (isCredits()) return "Credits skipped";
+            if (isPreview()) return "Preview skipped";
+            return "Intro skipped";
         }
     }
 
@@ -2135,8 +2322,11 @@ public final class IntroSkipBridge {
                 double end = interval.optDouble("endTime", -1.0);
                 if (start < 0.0 || end <= start) continue;
                 String type = result.optString("skipType", "").toLowerCase(Locale.US);
-                if (!"op".equals(type) && !"recap".equals(type)) continue;
-                String label = "op".equals(type) ? "OP" : "recap";
+                String label;
+                if ("op".equals(type) || type.startsWith("op") || "mixed-op".equals(type)) label = "OP";
+                else if ("recap".equals(type)) label = "recap";
+                else if ("ed".equals(type) || type.startsWith("ed") || "mixed-ed".equals(type)) label = "credits";
+                else continue;
                 double theirLength = result.optDouble("episodeLength", 0.0);
                 if (overlaps(segments, start, end)) continue;
                 segments.add(new Segment(start, end, label, "AniSkip"));
@@ -2153,7 +2343,7 @@ public final class IntroSkipBridge {
     private static JSONArray aniSkipResults(int malId, int episode, long episodeLength,
                                             DebugLogger logger) throws Exception {
         String endpoint = ANISKIP_URL + malId + "/" + episode +
-                "?types=op&types=recap&episodeLength=" + episodeLength;
+                "?types=op&types=ed&types=recap&episodeLength=" + episodeLength;
         return new JSONObject(request("GET", endpoint, null, logger)).optJSONArray("results");
     }
 
@@ -2307,7 +2497,7 @@ public final class IntroSkipBridge {
             }
             if (episodeLength > 0) url.append("&duration_ms=").append(episodeLength * 1000L);
             JSONObject response = new JSONObject(request("GET", url.toString(), null, logger));
-            String[] kinds = new String[]{"intro", "recap"};
+            String[] kinds = new String[]{"intro", "recap", "credits", "preview"};
             for (String kind : kinds) {
                 JSONArray items = response.optJSONArray(kind);
                 if (items == null) continue;
@@ -2324,7 +2514,12 @@ public final class IntroSkipBridge {
                     }
                     // An intro/recap with no end is unusable (it would skip the episode).
                     if (start < 0.0 || end <= start || end - start > 600) continue;
-                    Segment segment = new Segment(start, end, "intro".equals(kind) ? "OP" : "recap", "IntroDB");
+                    String label;
+                    if ("intro".equals(kind)) label = "OP";
+                    else if ("recap".equals(kind)) label = "recap";
+                    else if ("credits".equals(kind)) label = "credits";
+                    else label = "preview";
+                    Segment segment = new Segment(start, end, label, "IntroDB");
                     if (overlaps(out, start, end)) {
                         logger.log("IntroDB: duplicate skipped (" + kind + " " + start + "s)");
                         continue;

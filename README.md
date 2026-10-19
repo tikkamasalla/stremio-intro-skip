@@ -16,6 +16,7 @@ I made this for my own TV. It just skips the boring bits so playback keeps going
 * Settings in Stremio: on/off, anime on/off, Auto or Manual, recaps on/off.
 * Hide spoilers: optional switch in Settings > Interface that hides thumbnails and synopses for unwatched episodes.
 * External player progress: Stremio stays alive while an external player is open, so progress saves for Vimu, MX Player, mpv, VLC. The player starts at the saved position.
+* Skip credits: jumps to the end of the credits so after-credits scenes still play, then shows a Next episode pill. Settings: Skip credits Auto/Button/Off (default Button) and Skip previews on/off (default off). Series only.
 * Vimu: intro skip with Skip button and Auto/Manual settings, crash fixes, and progress result.
 
 Tested on Stremio 1.6.12 (com.stremio.one, Android TV).

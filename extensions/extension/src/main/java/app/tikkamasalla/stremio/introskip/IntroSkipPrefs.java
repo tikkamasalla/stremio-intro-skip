@@ -12,6 +12,15 @@ public final class IntroSkipPrefs {
     public static final String KEY_RECAPS = "introskip_recaps";
     public static final String MODE_AUTO = "auto";
     public static final String MODE_MANUAL = "manual";
+    public static final String KEY_CREDITS = "introskip_credits";
+    public static final String CREDITS_AUTO = "auto";
+    public static final String CREDITS_BUTTON = "button";
+    public static final String CREDITS_OFF = "off";
+    public static final String KEY_PREVIEWS = "introskip_previews";
+    public static final String KEY_BINGE_EXTERNAL = "external_binge";
+    public static final String KEY_TRACKMEM = "trackmem_enabled";
+    public static final String KEY_AUTOPICK = "autopick_enabled";
+    public static final String KEY_SHOWLIST = "autopick_showlist";
 
     private IntroSkipPrefs() {
     }
@@ -82,5 +91,68 @@ public final class IntroSkipPrefs {
 
     public static boolean isManualMode(Context context) {
         return MODE_MANUAL.equals(mode(context));
+    }
+
+    public static String creditsMode(Context context) {
+        try {
+            String value = prefs(context).getString(KEY_CREDITS, CREDITS_BUTTON);
+            if (CREDITS_AUTO.equals(value)) return CREDITS_AUTO;
+            if (CREDITS_OFF.equals(value)) return CREDITS_OFF;
+            return CREDITS_BUTTON;
+        } catch (Throwable ignored) {
+            return CREDITS_BUTTON;
+        }
+    }
+
+    public static boolean isCreditsAuto(Context context) {
+        return CREDITS_AUTO.equals(creditsMode(context));
+    }
+
+    public static boolean isCreditsButton(Context context) {
+        return CREDITS_BUTTON.equals(creditsMode(context));
+    }
+
+    public static boolean isCreditsOff(Context context) {
+        return CREDITS_OFF.equals(creditsMode(context));
+    }
+
+    public static boolean isPreviewsEnabled(Context context) {
+        try {
+            return prefs(context).getBoolean(KEY_PREVIEWS, false);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static boolean isBingeExternalEnabled(Context context) {
+        try {
+            return prefs(context).getBoolean(KEY_BINGE_EXTERNAL, true);
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
+    public static boolean isTrackMemEnabled(Context context) {
+        try {
+            return prefs(context).getBoolean(KEY_TRACKMEM, true);
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
+    public static boolean isAutoPickEnabled(Context context) {
+        try {
+            return prefs(context).getBoolean(KEY_AUTOPICK, true);
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
+    public static boolean isShowListEnabled(Context context) {
+        try {
+            return prefs(context).getBoolean(KEY_SHOWLIST, false);
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 }
