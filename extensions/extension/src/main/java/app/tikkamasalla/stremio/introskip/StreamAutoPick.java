@@ -69,7 +69,8 @@ public final class StreamAutoPick {
             long elapsed = now - firstAt;
             List<StreamRanker.Stream> candidates = toRanker(streams, metaNameOf(state));
             if (candidates.isEmpty()) return;
-            List<StreamRanker.Ranked> ranked = StreamRanker.rank(candidates, isMovie(state));
+            int[] req = StreamRanker.requestOf(videoId);
+            List<StreamRanker.Ranked> ranked = StreamRanker.rank(candidates, isMovie(state), req[0], req[1]);
             if (ranked.isEmpty()) return;
             boolean anyCached = false;
             for (StreamRanker.Ranked r : ranked) {
@@ -112,8 +113,9 @@ public final class StreamAutoPick {
                         List<StreamRanker.Stream> candidates = toRanker(streams, currentMetaName(fragment));
                         if (candidates.isEmpty()) return;
                         String vid = currentVideoId(fragment);
+                        int[] req = StreamRanker.requestOf(vid);
                         List<StreamRanker.Ranked> ranked =
-                                StreamRanker.rank(candidates, isMovieId(vid));
+                                StreamRanker.rank(candidates, isMovieId(vid), req[0], req[1]);
                         if (ranked.isEmpty()) return;
                         if (timer == 4) {
                             boolean anyCached = false;
