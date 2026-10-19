@@ -248,12 +248,18 @@ public final class StreamRanker {
             if (s == null) {
                 continue;
             }
-            if (!isMovie && reqEpisode > 0 && !episodeMatches(s, reqSeason, reqEpisode)) {
-                continue;
+            int kind = EP_UNKNOWN;
+            if (!isMovie && reqEpisode > 0) {
+                kind = episodeKind(s, reqSeason, reqEpisode);
+                if (kind == EP_REJECT) {
+                    continue;
+                }
             }
             ParsedMeta meta = parse(s);
             long score = computeScore(meta);
             Candidate c = new Candidate(s, meta, score);
+            c.multi = kind == EP_MULTI || kind == EP_PACK;
+            c.oversize = !isMovie && reqEpisode > 0 && meta.sizeBytes > MAX_EPISODE_BYTES;
             allCandidates.add(c);
             if (!meta.badSource) {
                 goodCandidates.add(c);
@@ -284,29 +290,37 @@ public final class StreamRanker {
                 if (a.meta.badSource != b.meta.badSource) {
                     return a.meta.badSource ? 1 : -1;
                 }
-                // 2. Cached before uncached
+                // 2. A single episode over the size cap is a pack or a file the TV cannot play
+                if (a.oversize != b.oversize) {
+                    return a.oversize ? 1 : -1;
+                }
+                // 3. Cached before uncached
                 if (a.meta.cached != b.meta.cached) {
                     return a.meta.cached ? -1 : 1;
                 }
-                // 3. Higher resolution first (AI upscale counts as 2160)
+                // 4. Single-episode files before season packs and multi-episode files
+                if (a.multi != b.multi) {
+                    return a.multi ? 1 : -1;
+                }
+                // 5. Higher resolution first (AI upscale counts as 2160)
                 if (a.meta.resolution != b.meta.resolution) {
                     return Integer.compare(b.meta.resolution, a.meta.resolution);
                 }
-                // 4. HDR / Dolby Vision before SDR
+                // 6. HDR / Dolby Vision before SDR
                 boolean aHdr = a.meta.hdr || a.meta.dolbyVision;
                 boolean bHdr = b.meta.hdr || b.meta.dolbyVision;
                 if (aHdr != bHdr) {
                     return aHdr ? -1 : 1;
                 }
-                // 5. Larger file size (in bytes) first
+                // 7. Larger file size (in bytes) first
                 if (a.meta.sizeBytes != b.meta.sizeBytes) {
                     return Long.compare(b.meta.sizeBytes, a.meta.sizeBytes);
                 }
-                // 6a. Tie-breaker: HEVC/AV1 over H264/other
+                // 8a. Tie-breaker: HEVC/AV1 over H264/other
                 if (a.meta.codecRank != b.meta.codecRank) {
                     return Integer.compare(b.meta.codecRank, a.meta.codecRank);
                 }
-                // 6b. Tie-breaker: More seeders
+                // 8b. Tie-breaker: More seeders
                 if (a.meta.seeders != b.meta.seeders) {
                     return Integer.compare(b.meta.seeders, a.meta.seeders);
                 }
@@ -347,6 +361,9 @@ public final class StreamRanker {
         }
     }
 
+    /** Episodes above this size are packs or remuxes the TV cannot play; they rank last. */
+    static final long MAX_EPISODE_BYTES = 25_000_000_000L;
+
     // Episode kinds returned by episodeKind().
     static final int EP_REJECT = -1;
     static final int EP_UNKNOWN = 0;
@@ -375,7 +392,7 @@ public final class StreamRanker {
             B_START + "(?:seasons?[\\s._-]*|s)(\\d{1,2})" + B_END + "(?!" + SEP + "EP?\\d)",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     private static final Pattern PACK_WORD_PATTERN = Pattern.compile(
-            B_START + "(?:complete|pack|collection|integrale|all[\\s._-]*seasons|full[\\s._-]*series)" + B_END,
+            B_START + "(?:complete|pack|collection|integrale|all[\\s._-]*seasons|full[\\s._-]*series|\u0441\u0435\u0437\u043E\u043D|\u0441\u0435\u0440\u0438\u0438)" + B_END,
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 
     /** True when the stream does not name a different season or episode than the requested one. */
@@ -391,7 +408,24 @@ public final class StreamRanker {
      */
     static int episodeKind(Stream stream, int reqSeason, int reqEpisode) {
         try {
-            String text = (stream.name != null ? stream.name : "") + "\n" + (stream.title != null ? stream.title : "");
+            String name = stream.name != null ? stream.name : "";
+            String title = stream.title != null ? stream.title : "";
+            int kind = kindOfText(name + "\n" + title, reqSeason, reqEpisode);
+            if (kind == EP_SINGLE || kind == EP_MULTI) {
+                // A pack torrent that lists the wanted file on a later line is still a pack.
+                String first = title.split("\\r?\\n", 2)[0];
+                if (kindOfText(first, reqSeason, reqEpisode) == EP_PACK) {
+                    return EP_PACK;
+                }
+            }
+            return kind;
+        } catch (Throwable ignored) {
+            return EP_UNKNOWN;
+        }
+    }
+
+    private static int kindOfText(String text, int reqSeason, int reqEpisode) {
+        try {
             // Seen as episode refs: {season or -1, from, to}.
             List<int[]> eps = new ArrayList<int[]>();
             boolean sawMatch = false;
@@ -724,6 +758,13 @@ public final class StreamRanker {
 
         parts.add(m.sizeDisplay);
 
+        if (current.oversize) {
+            parts.add("over 25 GB");
+        }
+        if (current.multi) {
+            parts.add("pack or multi-episode");
+        }
+
         if (!"unknown".equals(m.codec)) {
             parts.add(m.codec);
         }
@@ -745,6 +786,12 @@ public final class StreamRanker {
         if (isWinner) {
             if (m.cached != other.cached) {
                 return summary + " - wins: cached/instant-play beats uncached";
+            }
+            if (current.oversize != comparison.oversize) {
+                return summary + " - wins: the other stream is over 25 GB";
+            }
+            if (current.multi != comparison.multi) {
+                return summary + " - wins: single-episode file beats a pack";
             }
             if (m.resolution != other.resolution) {
                 if (m.aiUpscale && m.sizeBytes < other.sizeBytes) {
@@ -798,6 +845,8 @@ public final class StreamRanker {
         final Stream stream;
         final ParsedMeta meta;
         final long score;
+        boolean multi;
+        boolean oversize;
 
         Candidate(Stream stream, ParsedMeta meta, long score) {
             this.stream = stream;
