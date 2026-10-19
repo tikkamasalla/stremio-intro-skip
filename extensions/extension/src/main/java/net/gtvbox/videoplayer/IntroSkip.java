@@ -82,6 +82,14 @@ public final class IntroSkip implements Runnable {
     private static final String INTRODB_URL = "https://api.theintrodb.org/v4/media";
     private static final String INTRODB_APP_URL = "https://api.introdb.app/segments";
     private static final String CINEMETA_META_SERIES_URL = "https://v3-cinemeta.strem.io/meta/series/";
+    // Network robustness: every skip-related HTTP call keeps the 5 s timeouts,
+    // retries 429/5xx up to 3 times (Retry-After honoured, each wait capped at
+    // 3 s), returns not-found (204/404) immediately, and the whole lookup chain
+    // is capped at about 10 s so skip data still arrives before typical intros.
+    private static final long LOOKUP_BUDGET_MS = 10000L;
+    private static final int HTTP_MAX_ATTEMPTS = 4;
+    private static final long RETRY_WAIT_MAX_MS = 3000L;
+    private static final ThreadLocal<Long> DEADLINE_MS = new ThreadLocal<Long>();
     private static final Map<String, String> CINEMETA_IDS_CACHE = new ConcurrentHashMap<String, String>();
     private static final String CINEMETA_SERIES_URL = "https://v3-cinemeta.strem.io/catalog/series/top/search=";
     private static final Pattern IMDB_ID = Pattern.compile("(?i)(tt\\d{7,})");
@@ -1092,6 +1100,7 @@ public final class IntroSkip implements Runnable {
         new Thread(new Runnable() {
             @Override
             public void run() {
+                DEADLINE_MS.set(SystemClock.uptimeMillis() + LOOKUP_BUDGET_MS);
                 try {
                     List<Seg> out = null;
                     if (animeEnabled) {
@@ -1107,6 +1116,8 @@ public final class IntroSkip implements Runnable {
                     }
                 } catch (Throwable error) {
                     Log.w(TAG, "Remote lookup failed: " + error);
+                } finally {
+                    DEADLINE_MS.remove();
                 }
             }
         }, "IntroSkipRemote").start();
@@ -2211,10 +2222,41 @@ public final class IntroSkip implements Runnable {
         return String.format(Locale.US, "%.1f", v);
     }
 
-    /** HTTP helper with 5 s connect/read timeouts and 1 automatic retry. */
+    /**
+     * HTTP helper with 5 s connect/read timeouts, safe on the lookup thread:
+     * 204/404 mean not-found and return immediately with no retry (AniSkip
+     * returns 404 when no skip times exist for an episode); 429 and 5xx are
+     * retried up to 3 times, honouring Retry-After with each wait capped at
+     * 3 s; other failures after the last attempt throw. The whole lookup chain
+     * shares a ~10 s budget through DEADLINE_MS, set by the lookup thread.
+     */
     private static String http(String method, String url, String jsonBody, String bearer) throws Exception {
         Exception lastError = null;
-        for (int attempt = 0; attempt < 2; attempt++) {
+        long retryAfterMs = 0L;
+        for (int attempt = 1; attempt <= HTTP_MAX_ATTEMPTS; attempt++) {
+            long now = SystemClock.uptimeMillis();
+            Long deadline = DEADLINE_MS.get();
+            if (deadline != null && now >= deadline) {
+                throw new LookupBudgetException("lookup budget exhausted");
+            }
+            if (attempt > 1) {
+                long waitMs = retryAfterMs > 0 ? retryAfterMs : (500L << (attempt - 2));
+                if (waitMs > RETRY_WAIT_MAX_MS) waitMs = RETRY_WAIT_MAX_MS;
+                if (deadline != null) {
+                    long remaining = deadline - now;
+                    if (remaining < waitMs) waitMs = Math.max(remaining, 0L);
+                }
+                retryAfterMs = 0L;
+                if (waitMs > 0) {
+                    Log.i(TAG, "HTTP retry " + attempt + "/" + HTTP_MAX_ATTEMPTS + " in " + waitMs + "ms on " + url);
+                    try {
+                        Thread.sleep(waitMs);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new java.io.IOException("interrupted");
+                    }
+                }
+            }
             HttpURLConnection c = null;
             InputStream in = null;
             try {
@@ -2236,12 +2278,14 @@ public final class IntroSkip implements Runnable {
                     os.close();
                 }
                 int code = c.getResponseCode();
-                if (code == 404) {
-                    // AniSkip returns 404 when no skip times exist for an episode; no need to retry.
+                if (code == 204 || code == 404) {
                     return "{}";
                 }
-                if (code >= 500 || code == 429) {
-                    throw new java.io.IOException("HTTP " + code);
+                if (code == 429 || code >= 500) {
+                    retryAfterMs = retryAfterMs(c);
+                    lastError = new java.io.IOException("HTTP " + code);
+                    Log.i(TAG, "HTTP retryable " + code + " on " + url);
+                    continue;
                 }
                 in = code >= 400 ? c.getErrorStream() : c.getInputStream();
                 if (in == null) return "{}";
@@ -2252,11 +2296,11 @@ public final class IntroSkip implements Runnable {
                     out.write(buf, 0, n);
                 }
                 return out.toString("UTF-8");
-            } catch (Exception e) {
+            } catch (LookupBudgetException budget) {
+                throw budget;
+            } catch (java.io.IOException e) {
                 lastError = e;
-                if (attempt == 0) {
-                    Log.i(TAG, "HTTP retry after " + e.getClass().getSimpleName() + " on " + url);
-                }
+                Log.i(TAG, "HTTP retryable " + e.getClass().getSimpleName() + " on " + url);
             } finally {
                 if (in != null) {
                     try {
@@ -2273,6 +2317,31 @@ public final class IntroSkip implements Runnable {
             }
         }
         throw lastError != null ? lastError : new java.io.IOException("HTTP request failed");
+    }
+
+    private static final class LookupBudgetException extends java.io.IOException {
+        LookupBudgetException(String message) {
+            super(message);
+        }
+    }
+
+    /** Retry-After in ms (delta seconds or an HTTP date), 0 when absent or unusable. */
+    private static long retryAfterMs(HttpURLConnection c) {
+        try {
+            String value = c.getHeaderField("Retry-After");
+            if (value == null) return 0L;
+            value = value.trim();
+            if (value.length() == 0) return 0L;
+            try {
+                return Math.max(0L, Long.parseLong(value) * 1000L);
+            } catch (NumberFormatException notSeconds) {
+                long date = c.getHeaderFieldDate("Retry-After", -1L);
+                if (date > 0) return Math.max(0L, date - System.currentTimeMillis());
+            }
+        } catch (Throwable ignored) {
+            // A broken header must not fail the lookup.
+        }
+        return 0L;
     }
 
     private void resetMedia() {

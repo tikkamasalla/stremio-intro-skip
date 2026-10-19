@@ -77,6 +77,14 @@ public final class IntroSkipBridge {
     private static final String INTRODB_APP_URL = "https://api.introdb.app/segments";
     private static final String CINEMETA_META_SERIES_URL = "https://v3-cinemeta.strem.io/meta/series/";
     private static final String CINEMETA_META_MOVIE_URL = "https://v3-cinemeta.strem.io/meta/movie/";
+    // Network robustness: every skip-related HTTP call keeps the 5 s timeouts,
+    // retries 429/5xx up to 3 times (Retry-After honoured, each wait capped at
+    // 3 s), returns not-found (204/404) immediately, and the whole lookup chain
+    // is capped at about 10 s so skip data still arrives before typical intros.
+    private static final long LOOKUP_BUDGET_MS = 10000L;
+    private static final int HTTP_MAX_ATTEMPTS = 4;
+    private static final long RETRY_WAIT_MAX_MS = 3000L;
+    private static final ThreadLocal<Long> DEADLINE_MS = new ThreadLocal<Long>();
     private static final Map<String, String> CINEMETA_IDS_CACHE =
             new java.util.concurrent.ConcurrentHashMap<String, String>();
     private static final String CINEMETA_SERIES_URL = "https://v3-cinemeta.strem.io/catalog/series/top/search=";
@@ -805,13 +813,18 @@ public final class IntroSkipBridge {
                 NETWORK.execute(new Runnable() {
                     @Override
                     public void run() {
-                        final List<Segment> found = fetchAniSkip(title, season, episode, episodeLength, logger);
-                        MAIN.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                onAniSkip(generation, found, startedAt);
-                            }
-                        });
+                        DEADLINE_MS.set(SystemClock.uptimeMillis() + LOOKUP_BUDGET_MS);
+                        try {
+                            final List<Segment> found = fetchAniSkip(title, season, episode, episodeLength, logger);
+                            MAIN.post(new Runnable() {
+                                @Override
+                                public void run() {
+                                    onAniSkip(generation, found, startedAt);
+                                }
+                            });
+                        } finally {
+                            DEADLINE_MS.remove();
+                        }
                     }
                 });
             } else {
@@ -823,11 +836,14 @@ public final class IntroSkipBridge {
                 @Override
                 public void run() {
                     List<Segment> result;
+                    DEADLINE_MS.set(SystemClock.uptimeMillis() + LOOKUP_BUDGET_MS);
                     try {
                         result = fetchIntroDb(activity, imdbId, title, season, episode, episodeLength, logger);
                     } catch (Throwable error) {
                         logger.log("ERROR IntroDB: " + error);
-                        result = new ArrayList<>();
+                        result = new ArrayList<Segment>();
+                    } finally {
+                        DEADLINE_MS.remove();
                     }
                     final List<Segment> found = result;
                     MAIN.post(new Runnable() {
@@ -3057,45 +3073,134 @@ public final class IntroSkipBridge {
         return request(method, endpoint, body, null, logger);
     }
 
+    /**
+     * HTTP with the 5 s timeouts, safe on a worker thread: 204/404 mean
+     * not-found and return immediately with no retry; 429 and 5xx are retried
+     * up to 3 times, honouring Retry-After with each wait capped at 3 s; other
+     * failures after the last attempt throw. The whole lookup chain shares a
+     * ~10 s budget through DEADLINE_MS, set by the worker thread.
+     */
     private static String request(String method, String endpoint, String body, String auth,
                                   DebugLogger logger) throws Exception {
         String shown = endpoint.replaceAll("api_key=[^&]*", "api_key=***");
         logger.log("REQUEST " + method + " " + shown +
                 (body == null ? "" : "\nBody: " + clip(body)));
-        HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
-        connection.setRequestMethod(method);
-        connection.setConnectTimeout(5000);
-        connection.setReadTimeout(5000);
-        connection.setRequestProperty("Accept", "application/json");
-        connection.setRequestProperty("User-Agent", "Stremio");
-        if (auth != null && auth.length() > 0) {
-            connection.setRequestProperty("Authorization", auth);
+        Exception lastError = null;
+        long retryAfterMs = 0L;
+        for (int attempt = 1; attempt <= HTTP_MAX_ATTEMPTS; attempt++) {
+            long now = SystemClock.uptimeMillis();
+            Long deadline = DEADLINE_MS.get();
+            if (deadline != null && now >= deadline) {
+                throw new LookupBudgetException("lookup budget exhausted");
+            }
+            if (attempt > 1) {
+                long waitMs = retryAfterMs > 0 ? retryAfterMs : (500L << (attempt - 2));
+                if (waitMs > RETRY_WAIT_MAX_MS) waitMs = RETRY_WAIT_MAX_MS;
+                if (deadline != null) {
+                    long remaining = deadline - now;
+                    if (remaining < waitMs) waitMs = Math.max(remaining, 0L);
+                }
+                retryAfterMs = 0L;
+                if (waitMs > 0) {
+                    logger.log("RETRY " + attempt + "/" + HTTP_MAX_ATTEMPTS + " in " + waitMs + "ms");
+                    try {
+                        Thread.sleep(waitMs);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new java.io.IOException("interrupted");
+                    }
+                }
+            }
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(endpoint).openConnection();
+                connection.setRequestMethod(method);
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setRequestProperty("Accept", "application/json");
+                connection.setRequestProperty("User-Agent", "Stremio");
+                if (auth != null && auth.length() > 0) {
+                    connection.setRequestProperty("Authorization", auth);
+                }
+                if (body != null) {
+                    connection.setDoOutput(true);
+                    connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                    OutputStream output = connection.getOutputStream();
+                    output.write(body.getBytes(StandardCharsets.UTF_8));
+                    output.close();
+                }
+                int responseCode = connection.getResponseCode();
+                if (responseCode == 204 || responseCode == 404) {
+                    logger.log("RESPONSE " + responseCode + ": not found, no retry");
+                    return "{}";
+                }
+                if (responseCode == 429 || responseCode >= 500) {
+                    retryAfterMs = retryAfterMs(connection);
+                    lastError = new java.io.IOException("HTTP " + responseCode);
+                    logger.log("RESPONSE " + responseCode + ": retryable");
+                    continue;
+                }
+                InputStream input = responseCode >= 400
+                        ? connection.getErrorStream() : connection.getInputStream();
+                if (input == null) {
+                    logger.log("RESPONSE " + responseCode + ": <empty>");
+                    return "{}";
+                }
+                StringBuilder response = new StringBuilder();
+                BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
+                try {
+                    String line;
+                    while ((line = reader.readLine()) != null) response.append(line);
+                } finally {
+                    try {
+                        reader.close();
+                    } catch (Throwable ignored) {
+                        // The body was already read; closing must not fail the lookup.
+                    }
+                }
+                logger.log("RESPONSE " + responseCode + "\n" + clip(response.toString()));
+                return response.toString();
+            } catch (LookupBudgetException budget) {
+                throw budget;
+            } catch (java.io.IOException error) {
+                lastError = error;
+                logger.log("RETRYABLE " + error.getClass().getSimpleName() + ": " + safe(error.getMessage()));
+            } finally {
+                if (connection != null) {
+                    try {
+                        connection.disconnect();
+                    } catch (Throwable ignored) {
+                        // Disconnect is best effort.
+                    }
+                }
+            }
         }
-        if (body != null) {
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            OutputStream output = connection.getOutputStream();
-            output.write(body.getBytes(StandardCharsets.UTF_8));
-            output.close();
+        throw lastError == null ? new java.io.IOException("HTTP request failed") : lastError;
+    }
+
+    private static final class LookupBudgetException extends java.io.IOException {
+        LookupBudgetException(String message) {
+            super(message);
         }
-        int responseCode = connection.getResponseCode();
-        InputStream input = responseCode >= 400
-                ? connection.getErrorStream() : connection.getInputStream();
-        if (input == null) {
-            logger.log("RESPONSE " + responseCode + ": <vide>");
-            return "{}";
-        }
-        StringBuilder response = new StringBuilder();
+    }
+
+    /** Retry-After in ms (delta seconds or an HTTP date), 0 when absent or unusable. */
+    private static long retryAfterMs(HttpURLConnection connection) {
         try {
-            BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
-            String line;
-            while ((line = reader.readLine()) != null) response.append(line);
-            reader.close();
-        } finally {
-            connection.disconnect();
+            String value = connection.getHeaderField("Retry-After");
+            if (value == null) return 0L;
+            value = value.trim();
+            if (value.length() == 0) return 0L;
+            try {
+                return Math.max(0L, Long.parseLong(value) * 1000L);
+            } catch (NumberFormatException notSeconds) {
+                long date = connection.getHeaderFieldDate("Retry-After", -1L);
+                if (date > 0) return Math.max(0L, date - System.currentTimeMillis());
+            }
+        } catch (Throwable ignored) {
+            // A broken header must not fail the lookup.
         }
-        logger.log("RESPONSE " + responseCode + "\n" + clip(response.toString()));
-        return response.toString();
+        return 0L;
     }
 
     private static String clip(String value) {
