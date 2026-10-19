@@ -52,6 +52,16 @@ val externalPlayerProgressPatch = bytecodePatch(
             """.trimIndent(),
         )
 
+        // Completed result: save the full position and mark watched before the next episode opens.
+        try {
+            ExternalPlayerResultFingerprint.method.addInstructions(
+                0,
+                "invoke-static {p0, p1}, $EXTENSION->onExternalResult(Ljava/lang/Object;Ljava/lang/Object;)V",
+            )
+        } catch (_: Exception) {
+            // Stock handling stays.
+        }
+
         // Fail soft: this one only logs what reaches the core.
         try {
             PlayerTimeChangedFingerprint.method.addInstructions(

@@ -28,6 +28,13 @@ object ParseResultFingerprint : Fingerprint(
     parameters = listOf("I", "Landroid/content/Intent;"),
 )
 
+/** The player screen's handler for the external player's result: marks watched, then opens the next episode. */
+object ExternalPlayerResultFingerprint : Fingerprint(
+    definingClass = "Lcom/stremio/tv/views/player/PlayerFragment;",
+    name = "onExternalPlayerResult",
+    parameters = listOf(RESULT),
+)
+
 /** The single call that records progress in Stremio's core (also used by the internal player). */
 object PlayerTimeChangedFingerprint : Fingerprint(
     definingClass = "Lcom/stremio/common/api/StremioApi;",

@@ -451,6 +451,69 @@ public final class ExternalProgress {
         }
     }
 
+    /**
+     * Hook at the start of PlayerFragment.onExternalPlayerResult, before Stremio marks the episode
+     * watched and opens the next one. For a completed result it first saves the full position in
+     * the core, which creates or updates the library item (the stock completed branch never sends a
+     * position, and marking watched is ignored for an episode without one), then marks the episode
+     * watched. The mark is repeated after a short delay, because the core applies the progress
+     * asynchronously, and only while the player still holds the same episode. Fails soft.
+     */
+    public static void onExternalResult(Object fragment, Object result) {
+        try {
+            if (fragment == null || result == null) {
+                return;
+            }
+            if (!Boolean.TRUE.equals(invoke(result, "getCompleted"))) {
+                return;
+            }
+            final Object vm = invoke(fragment, "getViewModel");
+            if (vm == null) {
+                return;
+            }
+            long duration = ((Number) invoke(result, "getDuration")).longValue();
+            if (duration > 0L) {
+                ClassLoader loader = vm.getClass().getClassLoader();
+                Class<?> updateClass = Class.forName(
+                        "com.stremio.common.viewmodels.state.VideoPlaybackState$UpdateProgress",
+                        false, loader);
+                Object update = updateClass.getConstructor(long.class, long.class)
+                        .newInstance(duration, duration);
+                invoke(vm, "onStateChange", update);
+            }
+            final String videoId = currentVideoId(vm);
+            invoke(vm, "markAsWatched");
+            Log.i(TAG, "completed: progress saved and marked watched " + videoId);
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        if (videoId.length() > 0 && videoId.equals(currentVideoId(vm))) {
+                            invoke(vm, "markAsWatched");
+                            Log.i(TAG, "completed: marked watched again " + videoId);
+                        }
+                    } catch (Throwable error) {
+                        Log.w(TAG, "mark watched again", error);
+                    }
+                }
+            }, 1500L);
+        } catch (Throwable error) {
+            Log.w(TAG, "onExternalResult", error);
+        }
+    }
+
+    /** Id of the episode the player view model holds right now, or "". */
+    private static String currentVideoId(Object vm) {
+        try {
+            Object flow = invoke(vm, "getState");
+            Object state = flow == null ? null : invoke(flow, "getValue");
+            Object video = state == null ? null : invoke(state, "getCurrentVideo");
+            return video == null ? "" : string(invoke(video, "getId"));
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
     /** Keeps the process alive while the external player is open (see KeepAliveService). */
     private static void keepAlive(boolean start) {
         try {
