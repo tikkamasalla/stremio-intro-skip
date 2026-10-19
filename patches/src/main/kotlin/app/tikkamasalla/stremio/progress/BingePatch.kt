@@ -2,6 +2,7 @@ package app.tikkamasalla.stremio.progress
 
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.patch.bytecodePatch
 import app.tikkamasalla.stremio.introskip.Constants
 import com.android.tools.smali.dexlib2.Opcode
@@ -13,6 +14,13 @@ private object BingePlaybackFingerprint : Fingerprint(
     definingClass = "Lcom/stremio/tv/views/player/PlayerFragment;",
     name = "startStreamPlayback",
     parameters = listOf("Lcom/stremio/core/types/resource/Stream;", "J"),
+)
+
+private object EndNavigationFingerprint : Fingerprint(
+    definingClass = "Lcom/stremio/tv/views/player/PlayerFragment\$playerEventListener\$1;",
+    name = "invoke",
+    returnType = "V",
+    parameters = listOf(),
 )
 
 private object BingePrefsFingerprint : Fingerprint(
@@ -39,6 +47,22 @@ val bingeExternalPatch = bytecodePatch(
             )
         } catch (_: Exception) {
             // Internal playback keeps working; binge stays off on this build.
+        }
+        try {
+            // The internal player's end-of-playback callback: only a real end opens the next episode.
+            EndNavigationFingerprint.method.addInstructionsWithLabels(
+                0,
+                """
+                    invoke-static {p0}, $EXTENSION->allowAutoNext(Ljava/lang/Object;)Z
+                    move-result v0
+                    if-nez v0, :binge_allow
+                    return-void
+                    :binge_allow
+                    nop
+                """.trimIndent(),
+            )
+        } catch (_: Exception) {
+            // Stock behaviour stays.
         }
         try {
             BingePrefsFingerprint.method.apply {
