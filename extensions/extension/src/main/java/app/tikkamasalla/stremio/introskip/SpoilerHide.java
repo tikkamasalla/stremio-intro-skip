@@ -77,6 +77,31 @@ public final class SpoilerHide {
     }
 
     /**
+     * Hidden label for unwatched episodes when spoiler mode is ON, else null
+     * (caller runs the original label). Watched episodes and movies return null.
+     */
+    public static String episodeLabel(Object video) {
+        if (video == null) return null;
+        try {
+            if (!hides(video)) return null;
+            Method seriesInfo = video.getClass().getMethod("getSeriesInfo");
+            Object info = seriesInfo.invoke(video);
+            if (info == null) return null;
+            Object ep;
+            try {
+                ep = info.getClass().getMethod("getEpisode").invoke(info);
+            } catch (NoSuchMethodException missing) {
+                return null;
+            }
+            long episode = ep instanceof Number ? ((Number) ep).longValue() : 0L;
+            if (episode <= 0) return null;
+            return "Episode " + episode;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /**
      * Redraws the episode row when the setting changed, matching the hand made
      * VideosController.refreshSpoilers. Fail soft: any problem does nothing.
      * Only parameter and result registers are used by the call sites.

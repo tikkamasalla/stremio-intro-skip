@@ -18,6 +18,11 @@ I made this for my own TV. It just skips the boring bits so playback keeps going
 * External player progress: Stremio stays alive while an external player is open, so progress saves for Vimu, MX Player, mpv, VLC. The player starts at the saved position.
 * Avoid SDH subtitles: picks full dialogue subtitles over hearing-impaired tracks, and strips sound notes when no other track remains. Switches in Settings > Playback.
 * External player hand-off: Stremio passes the show, episode and selected subtitle to the external player, so Vimu skips intros and picks the right subtitle.
+* Skip credits: jumps to the end of the credits so after-credits scenes still play, then shows a Next episode pill. Settings: Skip credits Auto/Button/Off (default Button) and Skip previews on/off (default off). Series only.
+* Binge with external players: when an episode finishes in Vimu, MX Player, VLC or mpv, the next episode starts in the same player. Setting on/off (default on). Series only.
+* Remember tracks per show: reuses the last audio language and subtitle choice for other episodes of the same series. Setting on/off (default on).
+* Auto-pick best stream: plays the top ranked stream without showing the list. Cached first, then resolution, then HDR, then size. Setting on/off (default on) plus Always show stream list (default off).
+* Spoiler titles: when Hide spoilers is ON, unwatched episode titles show as Episode N in the row and header.
 * Vimu: intro skip with Skip button and Auto/Manual settings, crash fixes, and progress result.
 
 Tested on Stremio 1.6.12 (com.stremio.one, Android TV).

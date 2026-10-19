@@ -1,6 +1,7 @@
 package app.tikkamasalla.stremio.introskip
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.patch.bytecodePatch
 import com.android.tools.smali.dexlib2.Opcode
@@ -148,6 +149,39 @@ val hideSpoilersPatch = bytecodePatch(
             }
         } catch (_: Exception) {
             // First load keeps old rows on this build; onResume still refreshes.
+        }
+
+        // Episode titles: Video.getLabel -> "Episode N" when hidden, else original.
+        // Same register in (p0), same move-result out, one temp register.
+        try {
+            VideoLabelFingerprint.method.addInstructionsWithLabels(
+                0,
+                """
+                    invoke-static {p0}, $SPOILER_HIDE->episodeLabel(Ljava/lang/Object;)Ljava/lang/String;
+                    move-result-object v0
+                    if-eqz v0, :spoiler_label_orig
+                    return-object v0
+                    :spoiler_label_orig
+                    nop
+                """.trimIndent(),
+            )
+        } catch (_: Exception) {
+            // Header keeps vanilla titles on this build.
+        }
+        try {
+            VideoLabelWithDateFingerprint.method.addInstructionsWithLabels(
+                0,
+                """
+                    invoke-static {p0}, $SPOILER_HIDE->episodeLabel(Ljava/lang/Object;)Ljava/lang/String;
+                    move-result-object v0
+                    if-eqz v0, :spoiler_date_orig
+                    return-object v0
+                    :spoiler_date_orig
+                    nop
+                """.trimIndent(),
+            )
+        } catch (_: Exception) {
+            // Header keeps vanilla titles on this build.
         }
 
         // Settings switch in Stremio Settings, Interface screen.

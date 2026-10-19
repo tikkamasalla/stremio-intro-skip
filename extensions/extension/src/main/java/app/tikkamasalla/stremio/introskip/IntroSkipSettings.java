@@ -50,22 +50,47 @@ public final class IntroSkipSettings {
         target.addPreference(section);
 
         section.addPreference(switchRow(context, IntroSkipPrefs.KEY_ENABLED, "Skip intros",
-                "Skip intros and recaps during playback", IntroSkipPrefs.isEnabled(context)));
+                "Skip intros and recaps during playback", IntroSkipPrefs.isEnabled(context), true));
         section.addPreference(switchRow(context, IntroSkipPrefs.KEY_ANIME,
                 "Skip anime openings (AniSkip)", "Look up anime openings online",
-                IntroSkipPrefs.isAnimeEnabled(context)));
+                IntroSkipPrefs.isAnimeEnabled(context), true));
         section.addPreference(modeRow(context));
         section.addPreference(switchRow(context, IntroSkipPrefs.KEY_RECAPS, "Skip recaps",
-                "Skip recap segments too", IntroSkipPrefs.isRecapsEnabled(context)));
+                "Skip recap segments too", IntroSkipPrefs.isRecapsEnabled(context), true));
+        section.addPreference(creditsRow(context));
+        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_PREVIEWS, "Skip previews",
+                "Skip preview segments too", IntroSkipPrefs.isPreviewsEnabled(context), false));
+        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_BINGE_EXTERNAL,
+                "Auto-play next episode in external player",
+                "Start the next episode in the same external player when one finishes",
+                IntroSkipPrefs.isBingeExternalEnabled(context), true));
+        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_TRACKMEM,
+                "Remember tracks per show",
+                "Reuse the last audio and subtitle choice for other episodes",
+                IntroSkipPrefs.isTrackMemEnabled(context), true));
+        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_AUTOPICK,
+                "Auto-pick best stream",
+                "Play the top ranked stream without showing the list",
+                IntroSkipPrefs.isAutoPickEnabled(context), true));
+        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_SHOWLIST,
+                "Always show stream list",
+                "Never auto-pick, always show every stream",
+                IntroSkipPrefs.isShowListEnabled(context), false));
     }
 
     private static SwitchPreference switchRow(Context context, final String key,
                                               String title, String summary, boolean checked) {
+        return switchRow(context, key, title, summary, checked, true);
+    }
+
+    private static SwitchPreference switchRow(Context context, final String key,
+                                              String title, String summary, boolean checked,
+                                              boolean defaultValue) {
         final SwitchPreference row = new SwitchPreference(context);
         row.setKey(key);
         row.setTitle(title);
         row.setSummary(summary);
-        row.setDefaultValue(true);
+        row.setDefaultValue(defaultValue);
         row.setPersistent(false);
         row.setChecked(checked);
         row.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
@@ -115,5 +140,40 @@ public final class IntroSkipSettings {
         return IntroSkipPrefs.MODE_MANUAL.equals(value)
                 ? "Show the button, never skip alone"
                 : "Skip automatically";
+    }
+
+    private static ListPreference creditsRow(Context context) {
+        final ListPreference row = new ListPreference(context);
+        row.setKey(IntroSkipPrefs.KEY_CREDITS);
+        row.setTitle("Skip credits");
+        row.setEntries(new CharSequence[]{"Auto", "Button", "Off"});
+        row.setEntryValues(new CharSequence[]{IntroSkipPrefs.CREDITS_AUTO,
+                IntroSkipPrefs.CREDITS_BUTTON, IntroSkipPrefs.CREDITS_OFF});
+        row.setDefaultValue(IntroSkipPrefs.CREDITS_BUTTON);
+        row.setPersistent(false);
+        String value = IntroSkipPrefs.creditsMode(context);
+        row.setValue(value);
+        row.setSummary(creditsSummary(value));
+        row.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+            @Override
+            public boolean onPreferenceChange(Preference preference, Object newValue) {
+                String next = String.valueOf(newValue);
+                try {
+                    IntroSkipPrefs.prefs(preference.getContext()).edit()
+                            .putString(IntroSkipPrefs.KEY_CREDITS, next).apply();
+                } catch (Throwable ignored) {
+                    return false;
+                }
+                preference.setSummary(creditsSummary(next));
+                return true;
+            }
+        });
+        return row;
+    }
+
+    private static String creditsSummary(String value) {
+        if (IntroSkipPrefs.CREDITS_AUTO.equals(value)) return "Skip automatically";
+        if (IntroSkipPrefs.CREDITS_OFF.equals(value)) return "Never skip credits";
+        return "Show the button";
     }
 }
