@@ -74,6 +74,7 @@ public final class IntroSkipBridge {
     private static final String ANILIST_URL = "https://graphql.anilist.co";
     private static final String ANISKIP_URL = "https://api.aniskip.com/v2/skip-times/";
     private static final String INTRODB_URL = "https://api.theintrodb.org/v4/media";
+    private static final String INTRODB_APP_URL = "https://api.introdb.app/segments";
     private static final String CINEMETA_SERIES_URL = "https://v3-cinemeta.strem.io/catalog/series/top/search=";
     private static final String CINEMETA_MOVIE_URL = "https://v3-cinemeta.strem.io/catalog/movie/top/search=";
     private static final Pattern STREMIO_VIDEO_ID =
@@ -2592,7 +2593,8 @@ public final class IntroSkipBridge {
      * (a) an IMDb id from the stream/metadata, as before;
      * (b) else a keyless Cinemeta search by the cleaned show title (series catalog
      * for episodes, movie catalog for movies), exact normalized name match only;
-     * (c) then IntroDB with that id + season/episode (+ duration_ms as before).
+     * (c) then TheIntroDB with that id + season/episode (+ duration_ms as before);
+     * (d) then IntroDB.app, but only for segment types TheIntroDB has nothing for.
      * Runs on a NETWORK thread, never on the main thread, and never blocks AniSkip
      * (separate thread) or chapter skipping.
      */
@@ -2647,10 +2649,91 @@ public final class IntroSkipBridge {
                     logger.log("Segment IntroDB: " + kind + " " + start + "s -> " + end + "s");
                 }
             }
+            // IntroDB.app fills only the segment types TheIntroDB has nothing for.
+            if (isImdbId(id) && season > 0 && episode > 0
+                    && !(hasSegmentType(out, "OP") && hasSegmentType(out, "recap")
+                    && hasSegmentType(out, "credits") && hasSegmentType(out, "preview"))) {
+                for (Segment app : fetchIntroDbApp(id, season, episode, logger)) {
+                    if (hasSegmentType(out, app.label)) {
+                        logger.log("IntroDB.app: skipped " + app.label + ", TheIntroDB already has it");
+                        continue;
+                    }
+                    if (overlaps(out, app.startSeconds, app.endSeconds)) {
+                        logger.log("IntroDB.app: duplicate skipped (" + app.label + " " + app.startSeconds + "s)");
+                        continue;
+                    }
+                    out.add(app);
+                    logger.log("Segment IntroDB.app: " + app.label + " " + app.startSeconds
+                            + "s -> " + app.endSeconds + "s");
+                }
+            }
         } catch (Exception error) {
             logger.log("ERROR IntroDB: " + error.getClass().getSimpleName() + ": " + safe(error.getMessage()));
         }
         return out;
+    }
+
+    private static boolean isImdbId(String id) {
+        return id != null && id.regionMatches(true, 0, "tt", 0, 2);
+    }
+
+    private static boolean hasSegmentType(List<Segment> segments, String label) {
+        for (Segment segment : segments) {
+            if (segment.label.equals(label)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Keyless extra source, no key needed: GET /segments?imdb_id=&season=&episode
+     * answers {"intro": {"start_ms","end_ms",...}, "recap": {...}, "outro": {...},
+     * "post_credits": {...}} with null for unknown types. Mapping: intro to OP,
+     * recap to recap, outro/credits to credits, post_credits to preview.
+     */
+    private static List<Segment> fetchIntroDbApp(String imdbId, int season, int episode,
+                                                 DebugLogger logger) {
+        List<Segment> out = new ArrayList<Segment>();
+        try {
+            String url = INTRODB_APP_URL + "?imdb_id=" + imdbId + "&season=" + season + "&episode=" + episode;
+            JSONObject response = new JSONObject(request("GET", url, null, logger));
+            addAppSegment(out, response, "intro", "OP", logger);
+            addAppSegment(out, response, "recap", "recap", logger);
+            addAppSegment(out, response, "outro", "credits", logger);
+            addAppSegment(out, response, "credits", "credits", logger);
+            addAppSegment(out, response, "post_credits", "preview", logger);
+        } catch (Exception error) {
+            logger.log("ERROR IntroDB.app: " + error.getClass().getSimpleName() + ": " + safe(error.getMessage()));
+        }
+        return out;
+    }
+
+    private static void addAppSegment(List<Segment> out, JSONObject response, String key, String label,
+                                      DebugLogger logger) {
+        try {
+            if (hasSegmentType(out, label)) return;
+            JSONObject item = response.optJSONObject(key);
+            if (item == null) return;
+            double start;
+            double end;
+            if (!item.isNull("start_ms")) {
+                start = item.optLong("start_ms", -1L) / 1000.0;
+            } else if (!item.isNull("start_sec")) {
+                start = item.optDouble("start_sec", -1.0);
+            } else {
+                return;
+            }
+            if (!item.isNull("end_ms")) {
+                end = item.optLong("end_ms", -1L) / 1000.0;
+            } else if (!item.isNull("end_sec")) {
+                end = item.optDouble("end_sec", -1.0);
+            } else {
+                return;
+            }
+            if (start < 0.0 || end <= start || end - start > 600) return;
+            out.add(new Segment(start, end, label, "IntroDB.app"));
+        } catch (Exception error) {
+            logger.log("ERROR IntroDB.app (" + key + "): " + error.getClass().getSimpleName());
+        }
     }
 
     /**

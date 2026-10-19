@@ -60,8 +60,9 @@ import java.util.regex.Pattern;
  * segments of the file being played, using:
  * (a) the chapter list Vimu already parses for its seek-bar ticks;
  * (b) AniSkip (via AniList GraphQL -> MAL id -> AniSkip v2 API) for anime or confident matches;
- * (c) IntroDB (via a keyless Cinemeta title lookup -> IntroDB v4 API) as a fallback for western TV episodes.
- * Online segments from AniSkip and IntroDB snap to file chapter boundaries when chapters exist.
+ * (c) TheIntroDB (via a keyless Cinemeta title lookup -> TheIntroDB v4 API) as a fallback for western TV episodes;
+ * (d) IntroDB.app (keyless), but only for segment types TheIntroDB has nothing for.
+ * Online segments from AniSkip and the IntroDB sources snap to file chapter boundaries when chapters exist.
  *
  * Hooked from PlayerFragment.onResume/onPause.
  * Rules: one auto-skip per segment, 2.5 s guard after our seek, a chapter named OP/Opening wins over one
@@ -78,6 +79,8 @@ public final class IntroSkip implements Runnable {
 
     private static final String ANILIST_URL = "https://graphql.anilist.co";
     private static final String ANISKIP_URL = "https://api.aniskip.com/v2/skip-times/";
+    private static final String INTRODB_URL = "https://api.theintrodb.org/v4/media";
+    private static final String INTRODB_APP_URL = "https://api.introdb.app/segments";
     private static final String CINEMETA_SERIES_URL = "https://v3-cinemeta.strem.io/catalog/series/top/search=";
     private static final Pattern IMDB_ID = Pattern.compile("(?i)(tt\\d{7,})");
     private static final Pattern YEAR = Pattern.compile("\\b(19\\d{2}|20\\d{2})\\b");
@@ -236,12 +239,20 @@ public final class IntroSkip implements Runnable {
             return name != null && name.toLowerCase(Locale.US).matches(".*(recap|previously|あらすじ).*");
         }
 
+        boolean credits() {
+            return name != null && name.toLowerCase(Locale.US).matches(".*(credits|outro).*");
+        }
+
         String buttonText() {
-            return recap() ? "Skip recap (OK)" : "Skip intro (OK)";
+            if (recap()) return "Skip recap (OK)";
+            if (credits()) return "Skip credits (OK)";
+            return "Skip intro (OK)";
         }
 
         String skippedText() {
-            return recap() ? "Recap skipped" : "Intro skipped";
+            if (recap()) return "Recap skipped";
+            if (credits()) return "Credits skipped";
+            return "Intro skipped";
         }
     }
 
@@ -1693,10 +1704,11 @@ public final class IntroSkip implements Runnable {
     /**
      * Keyless IntroDB lookup: an IMDb id from the playing intent when one is present,
      * else a Cinemeta title search (exact normalized match, remembered for 60 days),
-     * then IntroDB by imdb_id + season/episode. No API keys are used.
+     * then TheIntroDB by imdb_id + season/episode, then IntroDB.app but only for
+     * segment types TheIntroDB has nothing for. No API keys are used.
      */
     private static List<Seg> fetchIntroDb(Context ctx, ParsedMedia info, int durationMs) {
-        List<Seg> out = new ArrayList<>();
+        List<Seg> out = new ArrayList<Seg>();
         try {
             String id = info.imdbId;
             if (id == null || id.length() == 0) {
@@ -1707,12 +1719,13 @@ public final class IntroSkip implements Runnable {
                 return out;
             }
             Log.i(TAG, "IntroDB: looking up imdb=" + id + " S" + info.season + "E" + info.episode);
-            JSONObject body = new JSONObject(http("GET", "https://api.theintrodb.org/v4/media?imdb_id=" + id
+            JSONObject body = new JSONObject(http("GET", INTRODB_URL + "?imdb_id=" + id
                     + "&season=" + info.season + "&episode=" + info.episode + "&duration_ms=" + durationMs,
                     null, null));
             // Process "intro" before "recap" so a recap can never suppress an overlapping intro.
-            String[] kinds = {"intro", "recap"};
-            for (String kind : kinds) {
+            String[] kinds = {"intro", "recap", "credits"};
+            for (int k = 0; k < kinds.length; k++) {
+                String kind = kinds[k];
                 JSONArray items = body.optJSONArray(kind);
                 for (int i = 0; items != null && i < items.length(); i++) {
                     JSONObject item = items.getJSONObject(i);
@@ -1721,7 +1734,20 @@ public final class IntroSkip implements Runnable {
                     // An entry with no end, or longer than 10 min, would skip the episode itself.
                     if (start < 0 || end <= start || end - start > 600000) continue;
                     if (overlapsMs(out, start, end)) continue;
-                    out.add(new Seg(start, end, "recap".equals(kind) ? "Recap" : "Intro", "introdb"));
+                    String name = "recap".equals(kind) ? "Recap" : "credits".equals(kind) ? "Credits" : "Intro";
+                    out.add(new Seg(start, end, name, "introdb"));
+                }
+            }
+            // IntroDB.app fills only the segment types TheIntroDB has nothing for.
+            if (isImdbId(id) && info.season > 0 && info.episode > 0
+                    && !(hasSegType(out, "Intro") && hasSegType(out, "Recap") && hasSegType(out, "Credits"))) {
+                for (Seg app : fetchIntroDbApp(id, info.season, info.episode)) {
+                    if (hasSegType(out, app.name)) {
+                        Log.i(TAG, "IntroDB.app: skipped " + app.name + ", TheIntroDB already has it");
+                        continue;
+                    }
+                    if (overlapsMs(out, app.start, app.end)) continue;
+                    out.add(app);
                 }
             }
             Collections.sort(out, new Comparator<Seg>() {
@@ -1736,6 +1762,70 @@ public final class IntroSkip implements Runnable {
             Log.w(TAG, "IntroDB lookup failed: " + error);
         }
         return out;
+    }
+
+    private static boolean isImdbId(String id) {
+        return id != null && id.regionMatches(true, 0, "tt", 0, 2);
+    }
+
+    private static boolean hasSegType(List<Seg> segs, String name) {
+        for (Seg s : segs) {
+            if (s.name.equals(name)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Keyless extra source, no key needed: GET /segments?imdb_id=&season=&episode
+     * answers {"intro": {"start_ms","end_ms",...}, "recap": {...}, "outro": {...}}
+     * with null for unknown types. Mapping: intro to Intro, recap to Recap,
+     * outro/credits to Credits. Post-credit scenes have no Vimu segment type and
+     * are left out.
+     */
+    private static List<Seg> fetchIntroDbApp(String imdbId, int season, int episode) {
+        List<Seg> out = new ArrayList<Seg>();
+        try {
+            String url = INTRODB_APP_URL + "?imdb_id=" + imdbId + "&season=" + season + "&episode=" + episode;
+            JSONObject response = new JSONObject(http("GET", url, null, null));
+            addAppSegment(out, response, "intro", "Intro");
+            addAppSegment(out, response, "recap", "Recap");
+            addAppSegment(out, response, "outro", "Credits");
+            addAppSegment(out, response, "credits", "Credits");
+        } catch (Throwable error) {
+            Log.w(TAG, "IntroDB.app lookup failed: " + error);
+        }
+        return out;
+    }
+
+    private static void addAppSegment(List<Seg> out, JSONObject response, String key, String name) {
+        try {
+            if (hasSegType(out, name)) return;
+            JSONObject item = response.optJSONObject(key);
+            if (item == null) return;
+            int start;
+            int end;
+            if (!item.isNull("start_ms")) {
+                start = item.optInt("start_ms", -1);
+            } else if (!item.isNull("start_sec")) {
+                double sec = item.optDouble("start_sec", -1.0);
+                start = sec < 0 ? -1 : (int) Math.round(sec * 1000.0);
+            } else {
+                return;
+            }
+            if (!item.isNull("end_ms")) {
+                end = item.optInt("end_ms", -1);
+            } else if (!item.isNull("end_sec")) {
+                double sec = item.optDouble("end_sec", -1.0);
+                end = sec < 0 ? -1 : (int) Math.round(sec * 1000.0);
+            } else {
+                return;
+            }
+            if (start < 0 || end <= start || end - start > 600000) return;
+            out.add(new Seg(start, end, name, "introdb.app"));
+            Log.i(TAG, "Segment IntroDB.app: " + key + " " + start + "-" + end + "ms");
+        } catch (Throwable error) {
+            Log.w(TAG, "IntroDB.app (" + key + ") failed: " + error);
+        }
     }
 
     /**
