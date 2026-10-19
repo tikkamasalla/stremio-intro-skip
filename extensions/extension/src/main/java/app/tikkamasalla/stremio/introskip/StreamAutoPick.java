@@ -252,6 +252,7 @@ public final class StreamAutoPick {
         List<StreamRanker.Stream> out = new ArrayList<StreamRanker.Stream>();
         for (Object s : streams) {
             if (s == null) continue;
+            if (!isPlayable(s)) continue;
             try {
                 String name = str(call(s, "getName"));
                 String title = str(call(s, "getDescription"));
@@ -288,6 +289,15 @@ public final class StreamAutoPick {
             }
         }
         return out;
+    }
+
+    /** Only streams the player can open directly: a URL or a torrent. Web links, YouTube and frames open other apps. */
+    private static boolean isPlayable(Object stream) {
+        try {
+            return call(stream, "getUrl") != null || call(stream, "getTorrent") != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private static Object streamFor(List<Object> streams, StreamRanker.Stream best) {

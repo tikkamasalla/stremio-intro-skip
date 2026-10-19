@@ -5,6 +5,7 @@ import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLa
 import app.morphe.patcher.patch.bytecodePatch
 import app.tikkamasalla.stremio.introskip.Constants
 import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 
 private const val EXTENSION = "Lapp/tikkamasalla/stremio/progress/ExternalProgress;"
 private const val RESULT = "Lcom/stremio/common/players/ExternalPlayerContract\$ExternalPlayerResult;"
@@ -30,9 +31,10 @@ val externalPlayerProgressPatch = bytecodePatch(
             addInstructions(0, "invoke-static {p1}, $EXTENSION->remember(Landroid/content/Context;)V")
             val returns = implementation!!.instructions.withIndex()
                 .filter { it.value.opcode == Opcode.RETURN_OBJECT }
-                .map { it.index }
-            returns.reversed().forEach { index ->
-                addInstructions(index, "invoke-static {p1}, $EXTENSION->decorate(Landroid/content/Intent;)V")
+                .map { it.index to (it.value as OneRegisterInstruction).registerA }
+            // The register that actually holds the returned Intent at each return.
+            returns.reversed().forEach { (index, register) ->
+                addInstructions(index, "invoke-static {v$register}, $EXTENSION->decorate(Landroid/content/Intent;)V")
             }
         }
 

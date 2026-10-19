@@ -219,6 +219,8 @@ public final class ExternalProgress {
             if (intent == null || !intent.hasExtra("return_result")) {
                 return; // the YouTube branch, not a player launch
             }
+            launchedAt = System.currentTimeMillis();
+            ensureExplicitPlayer(intent);
             applyHandoff(intent);
             int position = intent.getIntExtra("startfrom", 0);
             intent.putExtra("return_result", true);
@@ -291,12 +293,12 @@ public final class ExternalProgress {
 
     private static String normalizeMediaType(String metaType, int season, int episode) {
         String type = safe(metaType).toLowerCase(java.util.Locale.US);
-        if (type.contains("series") || type.contains("show") || type.contains("anime")
-                || type.equals("tv")) {
-            return "series";
-        }
         if (type.contains("movie") || type.contains("film")) {
             return "movie";
+        }
+        if (episode > 0 && (type.contains("series") || type.contains("show") || type.contains("anime")
+                || type.equals("tv"))) {
+            return "series";
         }
         return episode > 0 ? "series" : "movie";
     }
@@ -395,6 +397,11 @@ public final class ExternalProgress {
      * Hook at the start of parseResult. Reads position and duration from any known key and type, and
      * returns an ExternalPlayerResult, or null to let Stremio's own parser run.
      */
+    private static volatile long lastDuration;
+    private static volatile long launchedAt;
+    private static final String KEY_ARMED_AT = "external_binge_armed_at";
+    private static final long BINGE_TTL_MS = 60000L;
+
     public static Object parse(int resultCode, Intent data) {
         keepAlive(false);
         try {
@@ -407,16 +414,27 @@ public final class ExternalProgress {
             long position = readLong(extras, "extra_position", "position");
             long duration = readLong(extras, "extra_duration", "duration");
             String endBy = extras != null ? extras.getString("end_by") : null;
+            long openMs = launchedAt > 0L ? System.currentTimeMillis() - launchedAt : 0L;
+            launchedAt = 0L;
+            boolean userQuit = "user".equals(endBy);
             boolean completed = "playback_completion".equals(endBy);
             if ("net.gtvbox.videoplayer.result".equals(action)) {
                 completed |= resultCode == 1;
             } else if ("org.videolan.vlc.player.result".equals(action)) {
-                completed |= duration == 0L;
+                // A zero duration right after launch is a failed load or Back, not an ending.
+                completed |= duration == 0L && openMs > 10000L;
             } else if ("is.xyz.mpv.MPVActivity.result".equals(action)) {
-                completed |= resultCode == Activity_RESULT_OK && position == 0L && duration == 0L;
+                completed |= resultCode == Activity_RESULT_OK && position == 0L && duration == 0L
+                        && openMs > 10000L;
             }
-            if (!completed && duration > 0L && position >= (long) (duration * 0.95)) {
+            if (!completed && duration > 0L && position >= (long) (duration * 0.95)
+                    && (!userQuit || openMs > 15000L)) {
                 completed = true;
+            }
+            if (completed) {
+                // Stremio's core only gets position and duration: report a full position at the end.
+                if (duration <= 0L) duration = lastDuration;
+                if (duration > 0L && position < (long) (duration * 0.95)) position = duration;
             }
             Log.i(TAG, "result code=" + resultCode + " action=" + action + " position=" + position
                     + " duration=" + duration + " end_by=" + endBy + " completed=" + completed);
@@ -456,6 +474,7 @@ public final class ExternalProgress {
 
     /** Hook in StremioApi.playerTimeChanged: log only, shows what reaches the core. */
     public static void logTime(long position, long duration) {
+        if (duration > 0L) lastDuration = duration;
         Log.i(TAG, "playerTimeChanged position=" + position + " duration=" + duration);
     }
 
@@ -477,21 +496,33 @@ public final class ExternalProgress {
 
     private static void armBinge() {
         try {
-            if (!isBingeEnabled()) return;
+            if (!isBingeEnabled() || "movie".equals(capMediaType)) return;
             Context context = appContext;
             if (context == null) return;
             context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
-                    .edit().putBoolean(KEY_PENDING, true).apply();
+                    .edit().putBoolean(KEY_PENDING, true)
+                    .putLong(KEY_ARMED_AT, System.currentTimeMillis()).apply();
             Log.i(TAG, "binge armed");
         } catch (Throwable ignored) {
             // Binge is optional.
         }
     }
 
+    private static String lastPlayer() {
+        try {
+            Context context = appContext;
+            if (context == null) return null;
+            return context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                    .getString(KEY_PLAYER, null);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     private static void setLastPlayer(String target) {
         try {
             Context context = appContext;
-            if (context == null || target == null) return;
+            if (context == null || target == null || target.startsWith("com.android.")) return;
             context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
                     .edit().putString(KEY_PLAYER, target).apply();
         } catch (Throwable ignored) {
@@ -513,7 +544,12 @@ public final class ExternalProgress {
             android.content.SharedPreferences prefs =
                     context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE);
             if (!prefs.getBoolean(KEY_PENDING, false)) return;
+            long armedAt = prefs.getLong(KEY_ARMED_AT, 0L);
             prefs.edit().putBoolean(KEY_PENDING, false).apply();
+            if (System.currentTimeMillis() - armedAt > BINGE_TTL_MS) {
+                Log.i(TAG, "binge flag expired");
+                return;
+            }
             if (!prefs.getBoolean(KEY_BINGE, true)) return;
             if (isMovieFragment(fragment)) {
                 Log.i(TAG, "binge skipped: movie");
@@ -567,6 +603,42 @@ public final class ExternalProgress {
             }
         }
         return 0L;
+    }
+
+    /**
+     * Keeps the type video/* and, when no player was addressed, addresses the last used player
+     * (or Vimu) if it is installed, so Android never shows an "Open with" chooser that lists
+     * browsers. Stremio's own intent is left alone when it already names a player.
+     */
+    private static void ensureExplicitPlayer(Intent intent) {
+        try {
+            if (intent.getData() != null && intent.getType() == null) {
+                intent.setDataAndType(intent.getData(), "video/*");
+            }
+            if (intent.getPackage() != null || intent.getComponent() != null) {
+                return;
+            }
+            Context context = appContext;
+            if (context == null) {
+                return;
+            }
+            android.content.pm.PackageManager pm = context.getPackageManager();
+            String[] order = {lastPlayer(), "net.gtvbox.videoplayer"};
+            for (String name : order) {
+                if (name == null || name.length() == 0 || name.startsWith("com.android.")) {
+                    continue;
+                }
+                Intent probe = new Intent(intent);
+                probe.setPackage(name);
+                if (pm.resolveActivity(probe, 0) != null) {
+                    intent.setPackage(name);
+                    Log.i(TAG, "external player addressed: " + name);
+                    return;
+                }
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "ensureExplicitPlayer", error);
+        }
     }
 
     private static String resolveTarget(Intent intent) {
