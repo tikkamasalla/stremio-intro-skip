@@ -118,12 +118,16 @@ public final class IntroSkipBridge {
                                              final Player player,
                                              final boolean debugEnabled) {
         if (playerView == null || player == null) return;
+        Log.i(TAG, "onPlayerSet " + playerView.getClass().getSimpleName() + " " + player.getClass().getName());
         MAIN.post(new Runnable() {
             @Override
             public void run() {
                 try {
                     Activity activity = activityOf(playerView.getContext());
-                    if (activity == null || activity.isFinishing()) return;
+                    if (activity == null || activity.isFinishing()) {
+                        Log.i(TAG, "onPlayerSet ignored: activity=" + activity);
+                        return;
+                    }
                     Session session = SESSIONS.get(activity);
                     if (session == null || session.closed) {
                         session = new Session(activity);
@@ -702,7 +706,10 @@ public final class IntroSkipBridge {
                     // (Cinemeta movie catalog + IntroDB by IMDb id). TV episodes
                     // reveal their number on the first scans, so this never fires
                     // for them; chapters and AniSkip are unaffected either way.
-                    if (info.title.length() > 0 && info.episode <= 0 && infoAttempts >= 6) {
+                    // Only when Stremio's own video id says movie (no ":season:episode" part);
+                    // an unreadable or episode-shaped id (kitsu:id:ep) never wipes the chapters.
+                    if (info.title.length() > 0 && info.episode <= 0 && infoAttempts >= 6
+                            && isBareVideoId(anchor)) {
                         markMovie();
                     }
                     return;
@@ -878,7 +885,7 @@ public final class IntroSkipBridge {
             boolean waitChapters = chaptersRequested && !chaptersDone && now - chaptersStartedAt < 6000L;
             List<Segment> named = chapterSegments(chapters, false);
             boolean strongIntro = false;
-            for (Segment segment : named) strongIntro |= !segment.isRecap();
+            for (Segment segment : named) strongIntro |= !segment.isRecap() && !segment.isCredits() && !segment.isPreview();
             if (!strongIntro && online != null && !waitChapters) {
                 // An "Intro" chapter counts only if no OP/Opening chapter exists and AniSkip/IntroDB
                 // has nothing, or has an intro starting and ending within 15 s of that chapter.
@@ -1966,6 +1973,24 @@ public final class IntroSkipBridge {
      * fragment's navigation arguments hold videoId ("tt1844624:13:1", or just "tt..." for a movie).
      * Null when unavailable (other catalogs such as kitsu, or the fragment is not reachable yet).
      */
+    /** True only when the fragment's videoId is readable and has no episode part. */
+    private static boolean isBareVideoId(View view) {
+        try {
+            if (view == null || !view.isAttachedToWindow()) return false;
+            Class<?> manager = Class.forName("androidx.fragment.app.FragmentManager", false,
+                    view.getContext().getClassLoader());
+            Object fragment = manager.getMethod("findFragment", View.class).invoke(null, view);
+            if (fragment == null) return false;
+            Object args = fragment.getClass().getMethod("getArguments").invoke(fragment);
+            if (!(args instanceof Bundle)) return false;
+            String videoId = safe(((Bundle) args).getString("videoId"));
+            if (videoId.length() == 0) videoId = safe(((Bundle) args).getString("id"));
+            return videoId.length() > 0 && videoId.indexOf(':') < 0;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static String[] stremioVideoId(View view) {
         try {
             if (view == null || !view.isAttachedToWindow()) return null;

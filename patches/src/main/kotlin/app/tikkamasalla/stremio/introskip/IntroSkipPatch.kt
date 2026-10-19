@@ -58,7 +58,7 @@ val introSkipPatch = bytecodePatch(
         // Runs right after startStreamPlayback assigns this.player (index 5).
         // v0 = StremioPlayer (implements media3 Player), v1 = fragment root view.
         StartStreamPlaybackFingerprint.method.addInstructions(
-            5,
+            playerAssignedIndex(StartStreamPlaybackFingerprint.method),
             """
                 iget-object v0, p0, Lcom/stremio/tv/views/player/PlayerFragment;->player:Lcom/stremio/common/players/StremioPlayer;
                 invoke-virtual {p0}, Landroidx/fragment/app/Fragment;->getView()Landroid/view/View;

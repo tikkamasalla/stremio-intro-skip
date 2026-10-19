@@ -40,3 +40,22 @@ object PreferencesFragmentOnCreatePreferencesFingerprint : Fingerprint(
     name = "onCreatePreferences",
     parameters = listOf("Landroid/os/Bundle;", "Ljava/lang/String;"),
 )
+
+/**
+ * Index right after startStreamPlayback stores the StremioPlayer in PlayerFragment.player.
+ * Found by instruction, not by a fixed number, so other patches that insert code at the
+ * start of the method (for example the binge hook) cannot move a hook into dead code.
+ */
+fun playerAssignedIndex(method: app.morphe.patcher.util.proxy.mutableTypes.MutableMethod): Int {
+    val instructions = method.implementation!!.instructions
+    for ((index, instruction) in instructions.withIndex()) {
+        if (instruction.opcode != com.android.tools.smali.dexlib2.Opcode.IPUT_OBJECT) continue
+        val reference = (instruction as? com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction)
+            ?.reference ?: continue
+        val text = com.android.tools.smali.dexlib2.util.ReferenceUtil.getReferenceString(reference)
+        if (text == "Lcom/stremio/tv/views/player/PlayerFragment;->player:Lcom/stremio/common/players/StremioPlayer;") {
+            return index + 1
+        }
+    }
+    return 5
+}

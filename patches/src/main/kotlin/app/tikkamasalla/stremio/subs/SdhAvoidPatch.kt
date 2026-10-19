@@ -6,6 +6,7 @@ import app.tikkamasalla.stremio.introskip.Constants
 import app.tikkamasalla.stremio.introskip.PlayerViewSetPlayerFingerprint
 import app.tikkamasalla.stremio.introskip.PreferencesFragmentOnCreatePreferencesFingerprint
 import app.tikkamasalla.stremio.introskip.StartStreamPlaybackFingerprint
+import app.tikkamasalla.stremio.introskip.playerAssignedIndex
 import com.android.tools.smali.dexlib2.Opcode
 
 private const val EXTENSION_CLASS = "Lapp/tikkamasalla/stremio/subs/SdhAvoid;"
@@ -37,7 +38,7 @@ val avoidSdhPatch = bytecodePatch(
         // runs right after startStreamPlayback assigns this.player (index 5).
         try {
             StartStreamPlaybackFingerprint.method.addInstructions(
-                5,
+                playerAssignedIndex(StartStreamPlaybackFingerprint.method),
                 """
                     iget-object v0, p0, Lcom/stremio/tv/views/player/PlayerFragment;->player:Lcom/stremio/common/players/StremioPlayer;
                     invoke-virtual {p0}, Landroidx/fragment/app/Fragment;->getView()Landroid/view/View;
