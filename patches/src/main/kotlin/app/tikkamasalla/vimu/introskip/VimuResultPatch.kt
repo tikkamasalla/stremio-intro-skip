@@ -9,6 +9,7 @@ import com.android.tools.smali.dexlib2.builder.BuilderInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 
 private const val VIMU_RESULT = "Lnet/gtvbox/videoplayer/VimuResult;"
+private const val INTRO_SKIP = "Lnet/gtvbox/videoplayer/IntroSkip;"
 
 /**
  * Returns an MX Player style result from Vimu so Stremio saves progress.
@@ -27,6 +28,8 @@ val vimuResultPatch = bytecodePatch(
 
     execute {
         // Start position: v1 holds the extras Bundle right before "startfrom" is read.
+        // The hand-off extras Stremio added (media identity, subtitles) are captured here too;
+        // p0 is the fragment, v1 the extras Bundle.
         VimuResultStartFingerprint.method.apply {
             val anchor = findInstruction(
                 "start position anchor",
@@ -34,7 +37,10 @@ val vimuResultPatch = bytecodePatch(
             )
             addInstructions(
                 anchor,
-                "invoke-static {v1}, $VIMU_RESULT->normalize(Landroid/os/Bundle;)V",
+                """
+                invoke-static {v1}, $VIMU_RESULT->normalize(Landroid/os/Bundle;)V
+                invoke-static {p0, v1}, $INTRO_SKIP->capture(Ljava/lang/Object;Landroid/os/Bundle;)V
+                """.trimIndent(),
             )
         }
 

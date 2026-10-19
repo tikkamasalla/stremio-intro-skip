@@ -20,6 +20,11 @@ val externalPlayerProgressPatch = bytecodePatch(
     extendWith("extensions/extension.mpe")
 
     execute {
+        // Snapshot media identity and the selected subtitle when the user picks the player.
+        OpenInExternalPlayerFingerprint.method.apply {
+            addInstructions(0, "invoke-static {p0}, $EXTENSION->captureExternal(Ljava/lang/Object;)V")
+        }
+
         // Launch: add the start position under the keys each player reads.
         CreateIntentFingerprint.method.apply {
             addInstructions(0, "invoke-static {p1}, $EXTENSION->remember(Landroid/content/Context;)V")
