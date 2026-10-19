@@ -305,6 +305,12 @@ public final class IntroSkipBridge {
             attachedAt = SystemClock.uptimeMillis();
             seenAlive = false;
             deadSince = 0;
+            // The exo* reflection caches belong to the player, so a new player drops them.
+            exoLookedUp = false;
+            exoInternal = null;
+            exoSetSeek = null;
+            exoExact = null;
+            exoOriginal = null;
             resetMedia();
             if (debugEnabled && !debugDialogShown) {
                 debugDialogShown = true;
@@ -316,34 +322,53 @@ public final class IntroSkipBridge {
             }
         }
 
+        /**
+         * Forgets everything about the previous media. The player-scoped exo* reflection caches
+         * stay (they only change with the player, see offer()). inheritSeek carries an exact-seek
+         * state from one segment to the next of the SAME media, so it is cleared here.
+         */
         private void resetMedia() {
             identity = null;
             loadedKey = null;
+            lastSnapshot = null;
             pendingInfo = null;
             readySince = 0;
             nextInfoAt = 0;
             infoAttempts = 0;
             fetchGeneration++;
             mediaGeneration++;
+            aniDone = false;
+            introDone = false;
+            introResult = null;
+            skippedAt = 0;
             movie = false;
             segments.clear();
             autoSkipped.clear();
             jumpSkips.clear();
             firstPlayingAt = 0;
+            lastTraceAt = 0;
             inheritSeek = false;
             chaptersRequested = false;
             chaptersDone = false;
+            chaptersStartedAt = 0;
             chapters = null;
             online = null;
             onlineSource = null;
+            onlineStartedAt = 0;
             appliedSignature = null;
             current = null;
+            currentBySeek = false;
+            currentByJump = false;
+            lastSeekKeyAt = 0;
             lastPos = -1;
+            lastPollAt = 0;
             guardUntil = 0;
+            guardTarget = 0;
             landingCheckAt = 0;
-            exoLookedUp = false;
-            exoInternal = null;
-            nextPill = false;
+            lastOtherKeyAt = 0;
+            fragment = null;
+            controlsVisibleMethod = null;
+            // hidePill clears armed, pillSegment, nextPill and noticeUntil; it must see pillShown.
             hidePill(false);
         }
 
