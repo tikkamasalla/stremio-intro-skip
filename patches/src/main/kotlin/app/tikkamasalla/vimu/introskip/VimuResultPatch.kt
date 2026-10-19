@@ -16,7 +16,8 @@ private const val INTRO_SKIP = "Lnet/gtvbox/videoplayer/IntroSkip;"
  *
  * Ports the two proven smali hooks: w1 normalizes "position" / "extra_position"
  * to "startfrom", and j1 puts position, duration and end_by on the result
- * Intent. Every edit reuses only registers that are free at its site.
+ * Intent. Every edit reuses only registers that are free at its site. A third call (track)
+ * keeps the latest position on the activity result, so exits that bypass j1 still return it.
  */
 val vimuResultPatch = bytecodePatch(
     name = "External player result (Vimu)",
@@ -42,6 +43,7 @@ val vimuResultPatch = bytecodePatch(
                 """
                 invoke-static {v1}, $VIMU_RESULT->normalize(Landroid/os/Bundle;)V
                 invoke-static {p0, v1}, $INTRO_SKIP->capture(Ljava/lang/Object;Landroid/os/Bundle;)V
+                invoke-static {p0}, $VIMU_RESULT->track(Ljava/lang/Object;)V
                 """.trimIndent(),
             )
         }
