@@ -4,14 +4,27 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
+import android.widget.AbsSeekBar;
+import android.widget.AdapterView;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.ImageButton;
+import android.widget.TextView;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -43,17 +56,18 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Auto-skips the intro (and recap) chapter of the file being played, using:
+ * Skips (automatically or via an on-screen "Skip intro (OK)" pill) the intro and recap
+ * segments of the file being played, using:
  * (a) the chapter list Vimu already parses for its seek-bar ticks;
  * (b) AniSkip (via AniList GraphQL -> MAL id -> AniSkip v2 API) for anime or confident matches;
  * (c) IntroDB (via a keyless Cinemeta title lookup -> IntroDB v4 API) as a fallback for western TV episodes.
  * Online segments from AniSkip and IntroDB snap to file chapter boundaries when chapters exist.
  *
  * Hooked from PlayerFragment.onResume/onPause.
- * Rules: one skip per chapter, 2.5 s guard after our seek, a chapter named OP/Opening wins over one
- * named "Intro". Starting or resuming inside the intro skips; only a deliberate user seek (a jump
- * within 5 s of a left/right/rewind/fast-forward key, after 3 s of playback) is left alone.
- * Key presses are observed through a pass-through proxy of the activity's Window.Callback.
+ * Rules: one auto-skip per segment, 2.5 s guard after our seek, a chapter named OP/Opening wins over one
+ * named "Intro". Starting or resuming inside the intro skips in Auto mode; a deliberate user seek (a jump
+ * within 5 s of a left/right/rewind/fast-forward key, after 3 s of playback) or Manual mode shows the
+ * non-focusable pill instead. Key presses are observed through a pass-through proxy of Window.Callback.
  */
 public final class IntroSkip implements Runnable {
     private static final String TAG = "VimuIntroSkip";
@@ -132,7 +146,7 @@ public final class IntroSkip implements Runnable {
     private int durationMs = Integer.MIN_VALUE;
     private List<Seg> segments;
     private boolean chaptersHaveIntro;
-    /** Online timestamps (AniSkip or IntroDB) for the episode; used only when chapters give none. */
+    /** Online timestamps (AniSkip or IntroDB) for the episode; used when chapters give no intro. */
     private volatile List<Seg> remote;
     private boolean remoteStarted;
     private boolean remoteApplied;
@@ -148,13 +162,26 @@ public final class IntroSkip implements Runnable {
     private Seg current;
     private boolean currentBySeek;
     private boolean currentByJump;
+    private boolean inheritSeek;
     private long firstPlayingAt;
     private int flowPos = -1;
     private int flowTicks;
     private volatile long lastSeekKeyAt;
+    private volatile long lastOtherKeyAt;
+    private boolean okDownConsumed;
     private Window hookedWindow;
     private Window.Callback hookedOriginal;
     private Window.Callback hookedProxy;
+
+    // ---- On-screen "Skip intro (OK)" pill overlay ----
+    private FrameLayout host;
+    private TextView pill;
+    private boolean pillShown;
+    private boolean armed;
+    private Seg pillSegment;
+    private boolean controlsMethodLookedUp;
+    private Method controlsVisibleMethod;
+
     private final Runnable precise = new Runnable() {
         @Override
         public void run() {
@@ -186,6 +213,14 @@ public final class IntroSkip implements Runnable {
 
         boolean recap() {
             return name != null && name.toLowerCase(Locale.US).matches(".*(recap|previously|あらすじ).*");
+        }
+
+        String buttonText() {
+            return recap() ? "Skip recap (OK)" : "Skip intro (OK)";
+        }
+
+        String skippedText() {
+            return recap() ? "Recap skipped" : "Intro skipped";
         }
     }
 
@@ -240,7 +275,12 @@ public final class IntroSkip implements Runnable {
                 skip.running = true;
                 skip.lastPos = -1;
                 skip.firstPlayingAt = 0;
+                skip.okDownConsumed = false;
                 skip.hookKeys(f);
+                Log.i(TAG, "Settings: enabled=" + VimuIntroSkipPrefs.isEnabled(f)
+                        + " anime=" + VimuIntroSkipPrefs.isAnimeEnabled(f)
+                        + " mode=" + VimuIntroSkipPrefs.mode(f)
+                        + " recaps=" + VimuIntroSkipPrefs.isRecapsEnabled(f));
                 MAIN.removeCallbacks(skip);
                 MAIN.post(skip);
             }
@@ -254,6 +294,8 @@ public final class IntroSkip implements Runnable {
             IntroSkip skip = ACTIVE.get(f);
             if (skip != null) {
                 skip.running = false;
+                skip.okDownConsumed = false;
+                skip.removePill();
                 skip.unhookKeys();
                 MAIN.removeCallbacks(skip);
                 MAIN.removeCallbacks(skip.precise);
@@ -270,7 +312,15 @@ public final class IntroSkip implements Runnable {
                 || keyCode == KeyEvent.KEYCODE_MEDIA_STEP_BACKWARD || keyCode == KeyEvent.KEYCODE_MEDIA_STEP_FORWARD;
     }
 
-    /** Wraps the activity's Window.Callback in a pass-through proxy that only timestamps seek keys. */
+    private static boolean isOkKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
+                || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER || keyCode == KeyEvent.KEYCODE_BUTTON_A;
+    }
+
+    /**
+     * Wraps the activity's Window.Callback in a pass-through proxy that timestamps seek keys
+     * and intercepts OK only while the Skip pill is shown and Vimu's own controls are hidden.
+     */
     private void hookKeys(PlayerFragment f) {
         try {
             unhookKeys();
@@ -285,8 +335,14 @@ public final class IntroSkip implements Runnable {
                         @Override
                         public Object invoke(Object o, Method method, Object[] args) throws Throwable {
                             if ("dispatchKeyEvent".equals(method.getName()) && args != null && args.length == 1
-                                    && args[0] instanceof KeyEvent && isSeekKey(((KeyEvent) args[0]).getKeyCode())) {
-                                lastSeekKeyAt = SystemClock.uptimeMillis();
+                                    && args[0] instanceof KeyEvent) {
+                                try {
+                                    if (onKey((KeyEvent) args[0])) {
+                                        return Boolean.TRUE;
+                                    }
+                                } catch (Throwable error) {
+                                    Log.w(TAG, "onKey", error);
+                                }
                             }
                             try {
                                 return method.invoke(original, args);
@@ -318,6 +374,56 @@ public final class IntroSkip implements Runnable {
         hookedProxy = null;
     }
 
+    /** True = key consumed. Only OK on an armed Skip pill is ever consumed. */
+    private boolean onKey(KeyEvent event) {
+        if (!running || event == null) return false;
+        int keyCode = event.getKeyCode();
+        int action = event.getAction();
+        if (isSeekKey(keyCode)) {
+            lastSeekKeyAt = SystemClock.uptimeMillis();
+        }
+        if (!pillShown || pillSegment == null) {
+            okDownConsumed = false;
+            return false;
+        }
+        if (!isOkKey(keyCode)) {
+            okDownConsumed = false;
+            if (action == KeyEvent.ACTION_DOWN) {
+                // Any other key gives OK back to the player controls it just woke up.
+                lastOtherKeyAt = SystemClock.uptimeMillis();
+                if (armed) {
+                    armed = false;
+                    PlayerFragment f = fragment.get();
+                    styleArmed(f == null ? null : f.getActivity(), false);
+                }
+            }
+            return false;
+        }
+        if (action == KeyEvent.ACTION_DOWN) {
+            if (event.getRepeatCount() == 0) {
+                PlayerFragment f = fragment.get();
+                Activity activity = f == null ? null : f.getActivity();
+                refreshArmed(f, activity, SystemClock.uptimeMillis());
+                okDownConsumed = armed;
+            }
+            return okDownConsumed;
+        }
+        if (action == KeyEvent.ACTION_UP) {
+            if (!okDownConsumed) return false;
+            okDownConsumed = false;
+            Seg seg = pillSegment;
+            hidePill(false);
+            PlayerFragment f = fragment.get();
+            e p = f == null ? null : PlayerFragment.G0(f);
+            if (f != null && p != null && seg != null) {
+                int pos = p.getCurrentPosition();
+                skip(f, p, seg, pos, false);
+            }
+            return true;
+        }
+        return okDownConsumed;
+    }
+
     @Override
     public void run() {
         if (!running) return;
@@ -333,10 +439,20 @@ public final class IntroSkip implements Runnable {
         PlayerFragment f = fragment.get();
         if (f == null) {
             running = false;
+            removePill();
+            return;
+        }
+        Activity activity = f.getActivity();
+        if (activity == null || activity.isFinishing()
+                || (Build.VERSION.SDK_INT >= 17 && activity.isDestroyed())) {
+            hidePill(false);
             return;
         }
         e p = PlayerFragment.G0(f);
-        if (p == null) return;
+        if (p == null) {
+            if (pillShown) hidePill(true);
+            return;
+        }
         long now = SystemClock.uptimeMillis();
         int duration = p.getDuration();
         if (p != player) {
@@ -346,6 +462,15 @@ public final class IntroSkip implements Runnable {
         durationMs = duration;
         boolean playingNow = p.isPlaying();
         int posNow = p.getCurrentPosition();
+
+        if (!VimuIntroSkipPrefs.isEnabled(f)) {
+            current = null;
+            lastPos = posNow;
+            lastAt = now;
+            if (pillShown) hidePill(true);
+            return;
+        }
+
         if (firstPlayingAt == 0 && playingNow) firstPlayingAt = now;
         int moved = posNow - flowPos;
         flowPos = posNow;
@@ -376,13 +501,33 @@ public final class IntroSkip implements Runnable {
                 && chapterReads >= 1) {
             // Chapters had their chance (read at least once) and yielded no intro chapter: use online segments.
             remoteApplied = true;
+            inheritSeek = current != null && currentBySeek;
             List<Seg> snapped = snapSegments(fromRemote, p.E(), duration);
-            segments = snapped;
+            List<Seg> merged = new ArrayList<>();
+            if (segments != null) {
+                merged.addAll(segments);
+            }
             for (Seg s : snapped) {
+                if (!overlapsMs(merged, s.start, s.end)) {
+                    merged.add(s);
+                }
+            }
+            Collections.sort(merged, new Comparator<Seg>() {
+                @Override
+                public int compare(Seg a, Seg b) {
+                    return Integer.compare(a.start, b.start);
+                }
+            });
+            segments = merged;
+            current = null;
+            for (Seg s : merged) {
                 Log.i(TAG, "final segment '" + s.name + "' " + s.start + "-" + s.end + "ms (source " + s.rule + ")");
             }
         }
-        if (segments == null || segments.isEmpty()) return;
+        if (segments == null || segments.isEmpty()) {
+            if (pillShown) hidePill(true);
+            return;
+        }
 
         int pos = p.getCurrentPosition();
         boolean playing = p.isPlaying();
@@ -392,15 +537,22 @@ public final class IntroSkip implements Runnable {
         lastAt = now;
 
         if (guardUntil != 0) {
-            if (now < guardUntil && pos < guardTarget - 500) return;
+            if (now < guardUntil && pos < guardTarget - 500) {
+                if (pillShown) hidePill(true);
+                return;
+            }
             guardUntil = 0;
             jumped = false;
             // Our own seek just landed: the decoder is running, so a chained skip (recap, then intro) need not wait.
             if (playing) flowTicks = 4;
         }
 
+        boolean recaps = VimuIntroSkipPrefs.isRecapsEnabled(f);
+        boolean manualMode = VimuIntroSkipPrefs.isManualMode(f);
+
         Seg seg = null;
         for (Seg s : segments) {
+            if (!recaps && s.recap()) continue;
             if (pos >= s.start && pos < s.end - 400) {
                 seg = s;
                 break;
@@ -410,35 +562,290 @@ public final class IntroSkip implements Runnable {
             current = seg;
             // Only a jump the USER made (seek key just before it, after 3 s of playback) is a
             // deliberate seek. Start/resume and the player's own repositioning still skip.
-            currentByJump = seg != null && jumped;
-            currentBySeek = currentByJump && now - lastSeekKeyAt < 5000L && firstPlayingAt != 0
+            boolean recentSeekKey = now - lastSeekKeyAt < 5000L && firstPlayingAt != 0
                     && now - firstPlayingAt > 3000L;
+            currentByJump = seg != null && jumped;
+            currentBySeek = (currentByJump && recentSeekKey)
+                    || (seg != null && skipped.contains(seg.key()) && recentSeekKey)
+                    || (seg != null && inheritSeek);
             if (seg != null) {
                 Log.i(TAG, "enter '" + seg.name + "' pos=" + pos + "ms (start " + seg.start + ", late "
                         + (pos - seg.start) + "ms, " + (currentBySeek ? "user seek" : currentByJump
                         ? "player jump (start/resume)" : "playback") + ")");
             }
         }
+        inheritSeek = false;
+
         // Seeking before the decoder is really producing frames (the position still sits on the
         // resume point) crashed ExoPlayer natively on the TV, so wait for 4 polls of steady advance.
         boolean flowing = flowTicks >= 4;
-        if (seg != null && playing && flowing && !currentBySeek && !skipped.contains(seg.key())) {
-            skip(f, p, seg, pos);
+        boolean autoPending = seg != null && !manualMode && !currentBySeek && !skipped.contains(seg.key());
+        if (autoPending && playing && flowing) {
+            hidePill(false);
+            skip(f, p, seg, pos, true);
+            return;
         }
         if (seg == null && playing) {
             // 200 ms polling would show up to 0.2 s of the intro: re-check right at its start.
             for (Seg s : segments) {
+                if (!recaps && s.recap()) continue;
                 int ahead = s.start - pos;
-                if (ahead > 0 && ahead <= POLL_MS + 50 && !skipped.contains(s.key())) {
+                if (ahead > 0 && ahead <= POLL_MS + 50 && (manualMode || !skipped.contains(s.key()))) {
                     MAIN.removeCallbacks(precise);
                     MAIN.postDelayed(precise, Math.max(ahead + 10L, 15L));
                     break;
                 }
             }
         }
+
+        boolean shouldShowPill = seg != null && playing && (manualMode || currentBySeek) && !autoPending;
+        if (shouldShowPill) {
+            if (pillSegment != seg || !pillShown) {
+                showButton(f, activity, seg);
+            }
+            refreshArmed(f, activity, now);
+            updatePillPosition(f, activity);
+        } else if (pillShown) {
+            hidePill(true);
+        }
     }
 
-    // ---- Remote lookup: (1) AniSkip (AniList -> MAL id -> AniSkip), (2) IntroDB (TMDB -> IntroDB) ----
+    // ---- On-screen "Skip intro (OK)" pill UI ----
+
+    private void ensurePill(Activity activity) {
+        if (pill != null || activity == null) return;
+        try {
+            View content = activity.findViewById(android.R.id.content);
+            if (!(content instanceof FrameLayout)) {
+                Window w = activity.getWindow();
+                View decor = w == null ? null : w.getDecorView();
+                content = decor instanceof FrameLayout ? decor : null;
+            }
+            if (!(content instanceof FrameLayout)) return;
+            host = (FrameLayout) content;
+            TextView tv = new TextView(activity);
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            tv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            tv.setGravity(Gravity.CENTER);
+            tv.setSingleLine(true);
+            tv.setPadding(dp(activity, 22), dp(activity, 11), dp(activity, 22), dp(activity, 11));
+            tv.setFocusable(false);
+            tv.setFocusableInTouchMode(false);
+            tv.setClickable(false);
+            if (Build.VERSION.SDK_INT >= 16) {
+                tv.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            }
+            tv.setVisibility(View.GONE);
+            tv.setAlpha(0f);
+            if (Build.VERSION.SDK_INT >= 21) {
+                tv.setElevation(dp(activity, 8));
+            }
+            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM | Gravity.END);
+            params.setMargins(0, 0, dp(activity, 48), dp(activity, 48));
+            host.addView(tv, params);
+            pill = tv;
+        } catch (Throwable error) {
+            Log.w(TAG, "ensurePill", error);
+            pill = null;
+        }
+    }
+
+    private void styleArmed(Activity activity, boolean isArmed) {
+        if (pill == null || activity == null) return;
+        try {
+            if (isArmed) {
+                pill.setBackground(roundedBackground(activity, 0xF2FFFFFF, 0x00FFFFFF, dp(activity, 6)));
+                pill.setTextColor(0xFF15131A);
+            } else {
+                pill.setBackground(roundedBackground(activity, 0xCC17151C, 0x59FFFFFF, dp(activity, 6)));
+                pill.setTextColor(0xFFF2F0F5);
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "styleArmed", error);
+        }
+    }
+
+    private void showButton(PlayerFragment f, Activity activity, Seg seg) {
+        try {
+            ensurePill(activity);
+            if (pill == null) return;
+            pillSegment = seg;
+            armed = !controlsVisible(f) && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L;
+            pill.setText(seg.buttonText());
+            styleArmed(activity, armed);
+            fadeIn(f, activity);
+            Log.i(TAG, "Button shown: " + seg.buttonText() + (armed ? " (OK = skip)" : " (OK to player)"));
+        } catch (Throwable error) {
+            Log.w(TAG, "showButton", error);
+        }
+    }
+
+    private void refreshArmed(PlayerFragment f, Activity activity, long now) {
+        try {
+            boolean next = pillSegment != null && !controlsVisible(f) && now - lastOtherKeyAt > 600L;
+            if (next != armed) {
+                armed = next;
+                styleArmed(activity, armed);
+                Log.i(TAG, "Button " + (armed ? "armed (OK = skip)" : "disarmed (OK to player)"));
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "refreshArmed", error);
+        }
+    }
+
+    private void fadeIn(PlayerFragment f, Activity activity) {
+        try {
+            updatePillPosition(f, activity);
+            if (!pillShown && pill != null) {
+                pillShown = true;
+                pill.animate().cancel();
+                pill.setVisibility(View.VISIBLE);
+                pill.animate().alpha(1f).setDuration(160L).start();
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "fadeIn", error);
+        }
+    }
+
+    private void hidePill(boolean animate) {
+        armed = false;
+        okDownConsumed = false;
+        pillSegment = null;
+        if (pill == null || !pillShown) return;
+        pillShown = false;
+        try {
+            pill.animate().cancel();
+            if (animate) {
+                pill.animate().alpha(0f).setDuration(160L).withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            if (!pillShown && pill != null) pill.setVisibility(View.GONE);
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }).start();
+            } else {
+                pill.setAlpha(0f);
+                pill.setVisibility(View.GONE);
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "hidePill", error);
+        }
+    }
+
+    private void removePill() {
+        hidePill(false);
+        try {
+            if (host != null && pill != null) {
+                host.removeView(pill);
+            }
+        } catch (Throwable ignored) {
+        }
+        pill = null;
+        host = null;
+    }
+
+    private void updatePillPosition(PlayerFragment f, Activity activity) {
+        if (pill == null || !pillShown || activity == null) return;
+        try {
+            float lift = controlsVisible(f) ? -dp(activity, 56) : 0f;
+            if (pill.getTranslationY() != lift) {
+                pill.animate().translationY(lift).setDuration(160L).start();
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "updatePillPosition", error);
+        }
+    }
+
+    /** True while Vimu's on-screen controls or a dialog overlay are visible. */
+    private boolean controlsVisible(PlayerFragment f) {
+        try {
+            if (f == null) return false;
+            Activity activity = f.getActivity();
+            if (activity != null && !activity.hasWindowFocus()) {
+                return true;
+            }
+            if (!controlsMethodLookedUp) {
+                controlsMethodLookedUp = true;
+                try {
+                    controlsVisibleMethod = f.getClass().getMethod("isControlsOverlayVisible");
+                } catch (Throwable ignored) {
+                    controlsVisibleMethod = null;
+                }
+            }
+            if (controlsVisibleMethod != null) {
+                try {
+                    if (Boolean.TRUE.equals(controlsVisibleMethod.invoke(f))) return true;
+                } catch (Throwable ignored) {
+                }
+            }
+            View root = null;
+            try {
+                Method getView = f.getClass().getMethod("getView");
+                Object v = getView.invoke(f);
+                if (v instanceof View) root = (View) v;
+            } catch (Throwable ignored) {
+            }
+            if (root == null) root = host;
+            return hasVisibleControlView(root);
+        } catch (Throwable error) {
+            return false;
+        }
+    }
+
+    private boolean hasVisibleControlView(View view) {
+        if (view == null || view == pill) return false;
+        if (view.getVisibility() != View.VISIBLE || view.getAlpha() <= 0.05f) return false;
+        if (view instanceof AbsSeekBar || view instanceof Button || view instanceof ImageButton
+                || view instanceof AdapterView) {
+            return view.getWidth() > 0 && view.getHeight() > 0;
+        }
+        String cls = view.getClass().getSimpleName().toLowerCase(Locale.US);
+        if (cls.contains("seekbar") || cls.contains("timebar") || cls.contains("recyclerview")
+                || cls.contains("controllerview") || cls.contains("playercontrol")) {
+            return view.getWidth() > 0 && view.getHeight() > 0;
+        }
+        int id = view.getId();
+        if (id != View.NO_ID && id != android.R.id.content) {
+            try {
+                String name = view.getResources().getResourceEntryName(id).toLowerCase(Locale.US);
+                if (name.contains("seekbar") || name.contains("seek_bar") || name.contains("timebar")
+                        || name.contains("control_panel") || name.contains("controls")
+                        || name.contains("osd") || name.contains("controller")
+                        || name.contains("transport") || name.contains("bottom_panel")
+                        || name.contains("top_panel") || name.contains("info_panel")) {
+                    return view.getWidth() > 0 && view.getHeight() > 0;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            int count = group.getChildCount();
+            for (int i = 0; i < count; i++) {
+                if (hasVisibleControlView(group.getChildAt(i))) return true;
+            }
+        }
+        return false;
+    }
+
+    private static int dp(Activity activity, int value) {
+        return (int) (value * activity.getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private static GradientDrawable roundedBackground(Activity activity, int fillColor, int strokeColor, int radius) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(fillColor);
+        drawable.setCornerRadius(radius);
+        drawable.setStroke(dp(activity, 1), strokeColor);
+        return drawable;
+    }
+
+    // ---- Remote lookup: (1) AniSkip (AniList -> MAL id -> AniSkip), (2) IntroDB (Cinemeta -> IntroDB) ----
 
     private void startRemoteLookup(PlayerFragment f, final int durationMs) {
         Context appCtx = null;
@@ -459,6 +866,7 @@ public final class IntroSkip implements Runnable {
         final ParsedMedia info = parsed;
         final Context ctx = appCtx;
         final int gen = mediaGen;
+        final boolean animeEnabled = VimuIntroSkipPrefs.isAnimeEnabled(f);
         Log.i(TAG, "Media detected: title='" + info.title + "' S" + info.season + "E" + info.episode
                 + (info.year != null ? " year=" + info.year : "") + " animeHint=" + info.looksLikeAnime
                 + " (from '" + info.raw + "')");
@@ -466,7 +874,12 @@ public final class IntroSkip implements Runnable {
             @Override
             public void run() {
                 try {
-                    List<Seg> out = fetchAniSkip(ctx, info, durationMs);
+                    List<Seg> out = null;
+                    if (animeEnabled) {
+                        out = fetchAniSkip(ctx, info, durationMs);
+                    } else {
+                        Log.i(TAG, "AniSkip skipped: disabled in settings");
+                    }
                     if ((out == null || out.isEmpty()) && gen == mediaGen) {
                         out = fetchIntroDb(ctx, info, durationMs);
                     }
@@ -734,10 +1147,13 @@ public final class IntroSkip implements Runnable {
                         startMs, endMs, "recap".equals(type) ? "Recap" : "OP", theirLen, diff));
             }
 
-            // Choose the submission whose episodeLength best matches the real duration
+            // Choose the submission whose episodeLength best matches the real duration; prefer OP over Recap on ties
             Collections.sort(candidates, new Comparator<AniSkipCandidate>() {
                 @Override
                 public int compare(AniSkipCandidate a, AniSkipCandidate b) {
+                    boolean aOp = "OP".equals(a.name);
+                    boolean bOp = "OP".equals(b.name);
+                    if (aOp != bOp) return aOp ? -1 : 1;
                     return Double.compare(a.lengthDiffSec, b.lengthDiffSec);
                 }
             });
@@ -1009,7 +1425,8 @@ public final class IntroSkip implements Runnable {
             JSONObject body = new JSONObject(http("GET", "https://api.theintrodb.org/v4/media?imdb_id=" + id
                     + "&season=" + info.season + "&episode=" + info.episode + "&duration_ms=" + durationMs,
                     null, null));
-            String[] kinds = {"recap", "intro"};
+            // Process "intro" before "recap" so a recap can never suppress an overlapping intro.
+            String[] kinds = {"intro", "recap"};
             for (String kind : kinds) {
                 JSONArray items = body.optJSONArray(kind);
                 for (int i = 0; items != null && i < items.length(); i++) {
@@ -1022,6 +1439,12 @@ public final class IntroSkip implements Runnable {
                     out.add(new Seg(start, end, "recap".equals(kind) ? "Recap" : "Intro", "introdb"));
                 }
             }
+            Collections.sort(out, new Comparator<Seg>() {
+                @Override
+                public int compare(Seg a, Seg b) {
+                    return Integer.compare(a.start, b.start);
+                }
+            });
             Log.i(TAG, "IntroDB: imdb=" + id + " S" + info.season + "E" + info.episode
                     + " -> " + out.size() + " segment(s)");
         } catch (Throwable error) {
@@ -1354,10 +1777,13 @@ public final class IntroSkip implements Runnable {
         nextChapterRead = 0;
         current = null;
         currentByJump = false;
+        currentBySeek = false;
+        inheritSeek = false;
         firstPlayingAt = 0;
         flowTicks = 0;
         guardUntil = 0;
         lastPos = -1;
+        hidePill(false);
     }
 
     private static String chapterSignature(e p) {
@@ -1368,7 +1794,7 @@ public final class IntroSkip implements Runnable {
         return sig.toString();
     }
 
-    private void skip(PlayerFragment f, e p, Seg seg, int pos) {
+    private void skip(PlayerFragment f, e p, Seg seg, int pos, boolean automatic) {
         skipped.add(seg.key());
         int target = seg.end;
         if (durationMs > 0 && target > durationMs - 1000) target = Math.max(seg.start, durationMs - 1000);
@@ -1378,8 +1804,9 @@ public final class IntroSkip implements Runnable {
         guardUntil = SystemClock.uptimeMillis() + 2500L;
         guardTarget = target;
         current = null;
-        Log.i(TAG, "SKIP '" + seg.name + "' " + pos + "ms -> " + target + "ms (chapter " + seg.start + "-"
-                + seg.end + ", rule " + seg.rule + ")");
+        currentBySeek = false;
+        Log.i(TAG, (automatic ? "SKIP '" : "SKIP MANUAL '") + seg.name + "' " + pos + "ms -> " + target
+                + "ms (chapter " + seg.start + "-" + seg.end + ", rule " + seg.rule + ")");
         final int landTarget = target;
         MAIN.postDelayed(new Runnable() {
             @Override
@@ -1393,7 +1820,7 @@ public final class IntroSkip implements Runnable {
             }
         }, 1000L);
         try {
-            f.P1(seg.recap() ? "Recap skipped" : "Intro skipped");
+            f.P1(seg.skippedText());
         } catch (Throwable error) {
             Log.w(TAG, "notice", error);
         }
@@ -1435,16 +1862,24 @@ public final class IntroSkip implements Runnable {
             int end = endOf(starts, i, duration);
             if (end > starts[i] + 1000) found.add(new Seg((int) starts[i], end, names[i], "name"));
         }
+        boolean hasIntroSeg = false;
+        for (Seg s : found) {
+            if (!s.recap()) {
+                hasIntroSeg = true;
+                break;
+            }
+        }
         // b) unnamed chapters: a 60-110 s chapter starting in the first 6 minutes. If several
         //    qualify (e.g. an 85 s cold open before a 90 s OP), take the one closest to 90 s,
-        //    the usual TV opening length; ties go to the earlier one.
-        if (found.isEmpty()) {
+        //    the usual TV opening length; ties go to the earlier one. Checked whenever no
+        //    non-recap intro chapter was named, so a named recap never hides an unnamed OP.
+        if (!hasIntroSeg) {
             int best = -1;
             long bestDelta = Long.MAX_VALUE;
             for (int i = 0; i < n; i++) {
                 if (!GENERIC_NAME.matcher(names[i]).matches()) continue;
                 int end = endOf(starts, i, duration);
-                if (end <= 0) continue;
+                if (end <= 0 || overlapsMs(found, (int) starts[i], end)) continue;
                 long length = end - starts[i];
                 if (starts[i] <= 360000L && length >= 60000L && length <= 110000L) {
                     long delta = Math.abs(length - 90000L);
@@ -1457,11 +1892,20 @@ public final class IntroSkip implements Runnable {
             if (best >= 0) {
                 found.add(new Seg((int) starts[best], endOf(starts, best, duration),
                         names[best].length() == 0 ? "chapter " + (best + 1) : names[best], "length"));
+                hasIntroSeg = true;
             }
         }
-        // c) nothing usable: allow online fallback (AniSkip / IntroDB)
-        chaptersHaveIntro = !found.isEmpty();
+        Collections.sort(found, new Comparator<Seg>() {
+            @Override
+            public int compare(Seg a, Seg b) {
+                return Integer.compare(a.start, b.start);
+            }
+        });
+        // c) only a real intro chapter satisfies chaptersHaveIntro; a lone recap still allows online intro fallback
+        chaptersHaveIntro = hasIntroSeg;
+        inheritSeek = current != null && currentBySeek;
         segments = found;
+        current = null;
         if (found.isEmpty()) {
             Log.i(TAG, "no intro chapter");
         } else {
@@ -1494,4 +1938,3 @@ public final class IntroSkip implements Runnable {
         return duration > 0 ? duration : -1;
     }
 }
-

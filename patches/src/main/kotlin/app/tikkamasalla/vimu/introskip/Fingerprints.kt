@@ -45,7 +45,27 @@ object VimuMediaSessionReleaseFingerprint : Fingerprint(
 
 /** Cancels the seek debounce timer before it is replaced in Vimu 12.00. */
 object VimuSeekTimerCancelFingerprint : Fingerprint(
-    definingClass = "Lnet/gtvbox/videoplayer/n;",
+    definingClass = "Lnet/gtvbox/videoplayer/PlayerFragment;",
     name = "f",
     parameters = emptyList(),
+)
+
+/**
+ * Normalizes the start position in Vimu 12.00 (private w1): maps the common
+ * "position" / "extra_position" extras to "startfrom" via VimuResult.
+ */
+object VimuResultStartFingerprint : Fingerprint(
+    definingClass = "Lnet/gtvbox/videoplayer/PlayerFragment;",
+    name = "w1",
+    parameters = emptyList(),
+)
+
+/**
+ * Returns the MX Player style result in Vimu 12.00 (public j1): position,
+ * duration and end_by via VimuResult, with the result code mapping.
+ */
+object VimuResultFinishFingerprint : Fingerprint(
+    definingClass = "Lnet/gtvbox/videoplayer/PlayerFragment;",
+    name = "j1",
+    parameters = listOf("I"),
 )
