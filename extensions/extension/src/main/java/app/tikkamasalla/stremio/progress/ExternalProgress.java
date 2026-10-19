@@ -54,6 +54,7 @@ public final class ExternalProgress {
             } else {
                 intent.putExtra("position", position);
             }
+            if (target != null && target.length() > 0) setLastPlayer(target);
             Log.i(TAG, "launch position=" + position + " target=" + target);
             keepAlive(true);
         } catch (Throwable error) {
@@ -85,8 +86,12 @@ public final class ExternalProgress {
             } else if ("is.xyz.mpv.MPVActivity.result".equals(action)) {
                 completed |= resultCode == Activity_RESULT_OK && position == 0L && duration == 0L;
             }
+            if (!completed && duration > 0L && position >= (long) (duration * 0.95)) {
+                completed = true;
+            }
             Log.i(TAG, "result code=" + resultCode + " action=" + action + " position=" + position
                     + " duration=" + duration + " end_by=" + endBy + " completed=" + completed);
+            if (completed) armBinge();
             if (position <= 0L && duration <= 0L && !completed) {
                 return null;
             }
@@ -123,6 +128,92 @@ public final class ExternalProgress {
     /** Hook in StremioApi.playerTimeChanged: log only, shows what reaches the core. */
     public static void logTime(long position, long duration) {
         Log.i(TAG, "playerTimeChanged position=" + position + " duration=" + duration);
+    }
+
+    private static final String PREFS_FILE = "introskip_prefs";
+    private static final String KEY_BINGE = "external_binge";
+    private static final String KEY_PENDING = "external_binge_pending";
+    private static final String KEY_PLAYER = "external_binge_player";
+
+    public static boolean isBingeEnabled() {
+        try {
+            Context context = appContext;
+            if (context == null) return true;
+            return context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                    .getBoolean(KEY_BINGE, true);
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
+    private static void armBinge() {
+        try {
+            if (!isBingeEnabled()) return;
+            Context context = appContext;
+            if (context == null) return;
+            context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                    .edit().putBoolean(KEY_PENDING, true).apply();
+            Log.i(TAG, "binge armed");
+        } catch (Throwable ignored) {
+            // Binge is optional.
+        }
+    }
+
+    private static void setLastPlayer(String target) {
+        try {
+            Context context = appContext;
+            if (context == null || target == null) return;
+            context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                    .edit().putString(KEY_PLAYER, target).apply();
+        } catch (Throwable ignored) {
+            // Optional.
+        }
+    }
+
+    /**
+     * Hook at the start of PlayerFragment.startStreamPlayback. When the previous
+     * external playback finished, the next episode is already loading here with its
+     * best stream; relaunch it in the external player instead of playing inside.
+     * Movies never binge: a bare videoId without season and episode clears the flag.
+     * Fail soft: any problem leaves the internal playback running.
+     */
+    public static void maybeBinge(Object fragment, Object stream) {
+        try {
+            Context context = appContext;
+            if (context == null || fragment == null) return;
+            android.content.SharedPreferences prefs =
+                    context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE);
+            if (!prefs.getBoolean(KEY_PENDING, false)) return;
+            prefs.edit().putBoolean(KEY_PENDING, false).apply();
+            if (!prefs.getBoolean(KEY_BINGE, true)) return;
+            if (isMovieFragment(fragment)) {
+                Log.i(TAG, "binge skipped: movie");
+                return;
+            }
+            try {
+                fragment.getClass().getMethod("openInExternalPlayer", Long.class)
+                        .invoke(fragment, new Object[]{null});
+                Log.i(TAG, "binge: openInExternalPlayer");
+            } catch (Throwable error) {
+                Log.w(TAG, "binge", error);
+            }
+        } catch (Throwable ignored) {
+            // Internal playback continues.
+        }
+    }
+
+    private static boolean isMovieFragment(Object fragment) {
+        try {
+            Object args = fragment.getClass().getMethod("getArguments").invoke(fragment);
+            if (!(args instanceof android.os.Bundle)) return false;
+            android.os.Bundle bundle = (android.os.Bundle) args;
+            String videoId = bundle.getString("videoId");
+            if (videoId == null || videoId.length() == 0) videoId = bundle.getString("id");
+            if (videoId == null) return false;
+            return !videoId.contains(":");
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private static final int Activity_RESULT_OK = -1;
