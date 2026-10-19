@@ -14,10 +14,12 @@ I made this for my own TV. It just skips the boring bits so playback keeps going
 * Seeking back on purpose shows a "Skip intro" button instead of skipping again.
 * Remote keys are never blocked. OK on the button skips, everything else works as normal.
 * Settings in Stremio: on/off, anime on/off, Auto or Manual, recaps on/off.
-* Hide spoilers: optional switch in Settings Interface that hides thumbnails and synopses for unwatched episodes.
-* External player progress: watch progress is saved when you play in an external player (Vimu, MX Player, VLC, mpv), and the player starts at the saved position.
+* Hide spoilers: optional switch in Settings > Interface that hides thumbnails and synopses for unwatched episodes.
+* External player progress: Stremio stays alive while an external player is open, so progress saves for Vimu, MX Player, mpv, VLC. The player starts at the saved position.
+* Vimu: intro skip with Skip button and Auto/Manual settings, crash fixes, and progress result.
 
 Tested on Stremio 1.6.12 (com.stremio.one, Android TV).
+Tested on Vimu 12.00. If your copy doesn't patch cleanly, open an issue.
 
 ## Install with Morphe Manager
 
@@ -38,7 +40,7 @@ Tested on Stremio 1.6.12 (com.stremio.one, Android TV).
 
 The same bundle also carries an "Intro Skip (Vimu)" patch for Vimu 12.00 (net.gtvbox.videoplayer).
 
-It skips intros and recaps the same way: file chapter markers first, then AniSkip for anime and IntroDB for shows and movies. The IntroDB step needs no API key. It uses an IMDb id from the playing item when one is present, else a keyless Cinemeta title lookup that is remembered for 60 days. The patch also includes playback fixes from the same mod: deferred prepare for the tunneling crash on cold start, media session release on exit, seek timer cancel, and a 2 byte fix in libmediaengine.so for a native crash on rapid seeks. A "Skip intros" switch is added to Vimu Settings.
+It skips intros and recaps the same way: file chapter markers first, then AniSkip for anime and IntroDB for shows and movies. The IntroDB step needs no API key. It uses an IMDb id from the playing item when one is present, else a keyless Cinemeta title lookup that is remembered for 60 days. Auto mode skips at once, Manual mode shows a Skip button. The Vimu Settings rows cover Skip intros, anime openings, Auto/Manual mode, and recaps. The patch also includes crash fixes from the same mod: deferred prepare for the tunneling crash on cold start, media session release on exit, seek timer cancel, and a 2 byte fix in libmediaengine.so for a native crash on rapid seeks. It also returns position and duration so Stremio can save progress.
 
 Patch your own copy of the Vimu 12.00 APK. Copies that were already modified by someone else may carry extra checks that this patch does not remove, so test on your own copy.
 
