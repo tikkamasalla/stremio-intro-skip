@@ -8,10 +8,16 @@ android {
     namespace = "app.tikkamasalla.stremio.introskip"
 }
 
-val androidJar = File(
-    System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?: "E:/android-sdk",
-    "platforms/android-34/android.jar",
+val androidSdk = File(
+    System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+        ?: error("Set ANDROID_HOME or ANDROID_SDK_ROOT"),
 )
+// android-34 when present, otherwise the newest installed platform.
+val androidJar = File(androidSdk, "platforms/android-34/android.jar").takeIf { it.exists() }
+    ?: File(androidSdk, "platforms").listFiles { f -> f.name.startsWith("android-") }
+        ?.sortedBy { it.name.removePrefix("android-").toIntOrNull() ?: 0 }
+        ?.lastOrNull()?.let { File(it, "android.jar") }
+    ?: error("No Android platform found in $androidSdk")
 
 // Vimu's own classes (PlayerFragment, e, B.D) are compile-only stubs: they resolve
 // javac references in net.gtvbox.videoplayer but are never packaged into the .mpe,
