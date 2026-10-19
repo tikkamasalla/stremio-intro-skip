@@ -95,6 +95,10 @@ public final class IntroSkipBridge {
     private static final Map<String, String> CINEMETA_CACHE =
             new java.util.concurrent.ConcurrentHashMap<String, String>();
     private static final Pattern YEAR = Pattern.compile("\\b(19\\d{2}|20\\d{2})\\b");
+    /** Trailing "(1999-)", "(1999-2004)", "(2019)" (any dash, or none) that Stremio appends to a series name. */
+    private static final Pattern TRAILING_YEAR_RANGE = Pattern.compile(
+            "\\s*[(\\[]\\s*(?:19|20)\\d{2}\\s*(?:[-\\u2010-\\u2015]?\\s*(?:(?:19|20)\\d{2}|present|now)?\\s*)?[)\\]]\\s*$",
+            Pattern.CASE_INSENSITIVE);
     private static final Pattern IMDB_ID = Pattern.compile("(?i)(tt\\d{7,})");
     private static final Pattern META_SEASON_EPISODE = Pattern.compile("(?i)(?:^|[^a-z0-9])S(\\d{1,2})[ ._-]*E(\\d{1,4})(?=$|[^a-z0-9])");
     private static final Pattern SEASON_EPISODE = Pattern.compile("(?i)(?:^|[^a-z0-9])S\\d{1,2}[ ._-]*E(\\d{1,4})(?=$|[^a-z0-9])");
@@ -2497,6 +2501,7 @@ public final class IntroSkipBridge {
      * format, and an episode count that must reach our episode.
      */
     private static int[] resolveMalId(String title, int season, int episode, DebugLogger logger) throws Exception {
+        title = stripYearRange(title);
         int wanted = season > 0 ? season : 1;
         String base = normTitle(title);
         List<String> searches = new ArrayList<>();
@@ -2589,6 +2594,17 @@ public final class IntroSkipBridge {
             case "third": case "iii": return 3;
             case "fourth": case "iv": return 4;
             default: return 5;
+        }
+    }
+
+    /** Drops a trailing year range from a title before it is searched; returns the input if nothing else is left. */
+    static String stripYearRange(String value) {
+        String text = value == null ? "" : value.trim();
+        try {
+            String stripped = TRAILING_YEAR_RANGE.matcher(text).replaceFirst("").trim();
+            return stripped.length() > 0 ? stripped : text;
+        } catch (Throwable ignored) {
+            return text;
         }
     }
 
@@ -2937,7 +2953,8 @@ public final class IntroSkipBridge {
                                           boolean isMovie, DebugLogger logger) {
         String query;
         try {
-            query = java.net.URLEncoder.encode(wanted, StandardCharsets.UTF_8.name()).replace("+", "%20");
+            // The catalog search finds nothing for "One Piece (1999-)": search the bare name.
+            query = java.net.URLEncoder.encode(stripYearRange(wanted), StandardCharsets.UTF_8.name()).replace("+", "%20");
         } catch (Exception error) {
             logger.log("Cinemeta: no exact name match for \"" + wanted + "\" (bad title)");
             return "";
@@ -2964,6 +2981,7 @@ public final class IntroSkipBridge {
             String wantedBase = wantedYear > 0
                     ? wantedNorm.replaceAll("\\b" + wantedYear + "\\b", " ").replaceAll("\\s+", " ").trim()
                     : wantedNorm;
+            if (!stripYearRange(wanted).equals(wanted)) wantedBase = normTitle(stripYearRange(wanted));
             List<String> exactIds = new ArrayList<>();
             List<String> exactNames = new ArrayList<>();
             List<String> exactYears = new ArrayList<>();

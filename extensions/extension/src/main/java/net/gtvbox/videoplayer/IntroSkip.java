@@ -94,6 +94,10 @@ public final class IntroSkip implements Runnable {
     private static final String CINEMETA_SERIES_URL = "https://v3-cinemeta.strem.io/catalog/series/top/search=";
     private static final Pattern IMDB_ID = Pattern.compile("(?i)(tt\\d{7,})");
     private static final Pattern YEAR = Pattern.compile("\\b(19\\d{2}|20\\d{2})\\b");
+    /** Trailing "(1999-)", "(1999-2004)", "(2019)" (any dash, or none) that Stremio appends to a series name. */
+    private static final Pattern TRAILING_YEAR_RANGE = Pattern.compile(
+            "\\s*[(\\[]\\s*(?:19|20)\\d{2}\\s*(?:[-\\u2010-\\u2015]?\\s*(?:(?:19|20)\\d{2}|present|now)?\\s*)?[)\\]]\\s*$",
+            Pattern.CASE_INSENSITIVE);
 
     // ---- Stremio hand-off extras (set from w1 via capture, used before filename parsing) ----
     private static volatile boolean extHaveMedia;
@@ -1507,6 +1511,7 @@ public final class IntroSkip implements Runnable {
      */
     private static int[] resolveMalId(Context ctx, String title, int season, int episode, boolean looksLikeAnime)
             throws Exception {
+        title = stripYearRange(title);
         int wanted = season > 0 ? season : 1;
         boolean wantedPart2 = PART_TWO.matcher(title).find();
         String cleanTitle = PART_TWO.matcher(title).replaceAll(" ").replaceAll("\\s+", " ").trim();
@@ -2005,7 +2010,8 @@ public final class IntroSkip implements Runnable {
         }
         String query;
         try {
-            query = URLEncoder.encode(wanted, "UTF-8").replace("+", "%20");
+            // The catalog search finds nothing for "One Piece (1999-)": search the bare name.
+            query = URLEncoder.encode(stripYearRange(wanted), "UTF-8").replace("+", "%20");
         } catch (Throwable error) {
             Log.w(TAG, "Cinemeta: bad title \"" + wanted + "\"");
             return "";
@@ -2029,6 +2035,7 @@ public final class IntroSkip implements Runnable {
             String wantedBase = wantedYear > 0
                     ? wantedNorm.replaceAll("\\b" + wantedYear + "\\b", " ").replaceAll("\\s+", " ").trim()
                     : wantedNorm;
+            if (!stripYearRange(wanted).equals(wanted)) wantedBase = normTitle(stripYearRange(wanted));
             List<String> exactIds = new ArrayList<>();
             List<String> exactNames = new ArrayList<>();
             List<String> exactYears = new ArrayList<>();
@@ -2084,6 +2091,17 @@ public final class IntroSkip implements Runnable {
         } catch (Throwable error) {
             Log.w(TAG, "Cinemeta lookup failed: " + error);
             return "";
+        }
+    }
+
+    /** Drops a trailing year range from a title before it is searched; returns the input if nothing else is left. */
+    static String stripYearRange(String value) {
+        String text = value == null ? "" : value.trim();
+        try {
+            String stripped = TRAILING_YEAR_RANGE.matcher(text).replaceFirst("").trim();
+            return stripped.length() > 0 ? stripped : text;
+        } catch (Throwable ignored) {
+            return text;
         }
     }
 
