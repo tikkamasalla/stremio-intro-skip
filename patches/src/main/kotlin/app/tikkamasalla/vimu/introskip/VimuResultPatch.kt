@@ -1,6 +1,10 @@
 package app.tikkamasalla.vimu.introskip
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
+import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
+import com.android.tools.smali.dexlib2.AccessFlags
+import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
+import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import app.morphe.patcher.patch.PatchException
 import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod
@@ -10,6 +14,7 @@ import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 
 private const val VIMU_RESULT = "Lnet/gtvbox/videoplayer/VimuResult;"
 private const val INTRO_SKIP = "Lnet/gtvbox/videoplayer/IntroSkip;"
+private const val PLAYER_ACTIVITY = "Lnet/gtvbox/videoplayer/PlayerActivity;"
 
 /**
  * Returns an MX Player style result from Vimu so Stremio saves progress.
@@ -64,6 +69,43 @@ val vimuResultPatch = bytecodePatch(
                 move-result p1
                 """.trimIndent(),
             )
+        }
+
+        // Home or recents: return the result right away, while the caller can still take it.
+        // Vimu opening its own preferences from the player is reported first, so it is skipped.
+        try {
+            VimuOwnScreenFingerprint.method.addInstructions(
+                0,
+                "invoke-static {}, $VIMU_RESULT->ownScreen()V",
+            )
+        } catch (_: Exception) {
+            // Opening Vimu's preferences from the player would also return the result.
+        }
+        try {
+            val activity = mutableClassDefBy(PLAYER_ACTIVITY)
+            if (activity.methods.none { it.name == "onUserLeaveHint" && it.parameterTypes.isEmpty() }) {
+                val method = ImmutableMethod(
+                    PLAYER_ACTIVITY,
+                    "onUserLeaveHint",
+                    emptyList(),
+                    "V",
+                    AccessFlags.PUBLIC.value,
+                    null,
+                    null,
+                    MutableMethodImplementation(1),
+                ).toMutable()
+                method.addInstructions(
+                    0,
+                    """
+                    invoke-super {p0}, Landroid/app/Activity;->onUserLeaveHint()V
+                    invoke-static {p0}, $VIMU_RESULT->userLeave(Ljava/lang/Object;)V
+                    return-void
+                    """.trimIndent(),
+                )
+                activity.methods.add(method)
+            }
+        } catch (_: Exception) {
+            // The result still returns when Vimu stops, as before.
         }
     }
 }

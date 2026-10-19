@@ -12,4 +12,7 @@ public class PlayerFragment extends android.app.Fragment {
 
     public void P1(String message) {
     }
+
+    public void j1(int code) {
+    }
 }

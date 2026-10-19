@@ -60,6 +60,13 @@ object VimuResultStartFingerprint : Fingerprint(
     parameters = emptyList(),
 )
 
+/** Opens Vimu's own preferences screen from the player in Vimu 12.00 (public j). */
+object VimuOwnScreenFingerprint : Fingerprint(
+    definingClass = "Lnet/gtvbox/videoplayer/PlayerFragment;",
+    name = "j",
+    parameters = emptyList(),
+)
+
 /**
  * Returns the MX Player style result in Vimu 12.00 (public j1): position,
  * duration and end_by via VimuResult, with the result code mapping.

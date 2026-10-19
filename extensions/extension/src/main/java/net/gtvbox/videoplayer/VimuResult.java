@@ -6,6 +6,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.lang.reflect.Field;
@@ -25,6 +26,9 @@ public final class VimuResult {
     private static volatile WeakReference<PlayerFragment> tracked;
     private static boolean ticking;
     private static boolean logged;
+    /** When Vimu itself last opened one of its own screens from the player (its preferences). */
+    private static volatile long ownScreenAt;
+    private static final long OWN_SCREEN_MS = 3000L;
 
     private VimuResult() {
     }
@@ -43,6 +47,35 @@ public final class VimuResult {
             }
         } catch (Throwable error) {
             Log.w(TAG, "track", error);
+        }
+    }
+
+    /** Hook at the start of PlayerFragment.j (opens Vimu's own preferences from the player). */
+    public static void ownScreen() {
+        ownScreenAt = SystemClock.uptimeMillis();
+    }
+
+    /**
+     * Hook in PlayerActivity.onUserLeaveHint (Home, recents). Returns the result to the caller
+     * right away instead of at onStop: by then a caller that was stopped behind the player has
+     * already dropped its player screen, so the progress would be lost. Does nothing when the
+     * player was not started for a result, when Vimu opened its own screen, or when the activity
+     * is already going away.
+     */
+    public static void userLeave(Object owner) {
+        try {
+            if (!(owner instanceof Activity)) return;
+            Activity activity = (Activity) owner;
+            if (activity.isFinishing() || activity.isChangingConfigurations()) return;
+            if (activity.getCallingActivity() == null) return;
+            if (SystemClock.uptimeMillis() - ownScreenAt < OWN_SCREEN_MS) return;
+            if (Build.VERSION.SDK_INT >= 24 && activity.isInPictureInPictureMode()) return;
+            PlayerFragment f = tracked == null ? null : tracked.get();
+            if (f == null || f.getActivity() != activity) return;
+            Log.i(TAG, "user left Vimu: returning the result now");
+            f.j1(0);
+        } catch (Throwable error) {
+            Log.w(TAG, "userLeave", error);
         }
     }
 
