@@ -145,6 +145,7 @@ public final class IntroSkip implements Runnable {
     private e player;
     private int durationMs = Integer.MIN_VALUE;
     private List<Seg> segments;
+    private int mediaKind; // 0 unknown, 1 episode, 2 movie
     private boolean chaptersHaveIntro;
     /** Online timestamps (AniSkip or IntroDB) for the episode; used when chapters give no intro. */
     private volatile List<Seg> remote;
@@ -471,6 +472,22 @@ public final class IntroSkip implements Runnable {
             return;
         }
 
+        if (mediaKind == 0) {
+            mediaKind = isEpisodeIntent(activity.getIntent()) ? 1 : 2;
+            if (mediaKind == 2) {
+                Log.i(TAG, "movie, skipping disabled");
+                Log.i(TAG, "movie check saw: " + describeIntent(activity.getIntent()));
+            }
+        }
+        if (mediaKind == 2) {
+            // Movies are never skipped: no chapters, no pill, no lookups.
+            current = null;
+            lastPos = posNow;
+            lastAt = now;
+            if (pillShown) hidePill(true);
+            return;
+        }
+
         if (firstPlayingAt == 0 && playingNow) firstPlayingAt = now;
         int moved = posNow - flowPos;
         flowPos = posNow;
@@ -677,7 +694,8 @@ public final class IntroSkip implements Runnable {
             pill.setText(seg.buttonText());
             styleArmed(activity, armed);
             fadeIn(f, activity);
-            Log.i(TAG, "Button shown: " + seg.buttonText() + (armed ? " (OK = skip)" : " (OK to player)"));
+            Log.i(TAG, "Button shown: " + seg.buttonText() + (armed ? " (OK = skip)" : " (OK to player)")
+                    + (armed ? "" : " [" + controlsReason(f) + "]"));
         } catch (Throwable error) {
             Log.w(TAG, "showButton", error);
         }
@@ -779,7 +797,9 @@ public final class IntroSkip implements Runnable {
             }
             if (controlsVisibleMethod != null) {
                 try {
-                    if (Boolean.TRUE.equals(controlsVisibleMethod.invoke(f))) return true;
+                    // The player's own answer is authoritative; the view scan is only a fallback.
+                    Object answer = controlsVisibleMethod.invoke(f);
+                    if (answer instanceof Boolean) return ((Boolean) answer).booleanValue();
                 } catch (Throwable ignored) {
                 }
             }
@@ -797,40 +817,75 @@ public final class IntroSkip implements Runnable {
         }
     }
 
+    private String controlsReason(PlayerFragment f) {
+        try {
+            Activity activity = f.getActivity();
+            if (activity != null && !activity.hasWindowFocus()) return "no window focus";
+            if (controlsVisibleMethod != null) return "overlay method " + controlsVisibleMethod.invoke(f);
+            Object v = f.getClass().getMethod("getView").invoke(f);
+            return "view " + (v instanceof View ? visibleControl((View) v, 1f) : "null");
+        } catch (Throwable error) {
+            return "reason error " + error;
+        }
+    }
+
     private boolean hasVisibleControlView(View view) {
-        if (view == null || view == pill) return false;
-        if (view.getVisibility() != View.VISIBLE || view.getAlpha() <= 0.05f) return false;
+        return visibleControl(view, 1f) != null;
+    }
+
+    /**
+     * Describes the first control view that is really on screen (own and inherited alpha, visibility
+     * and clipping all count), or null. A hidden overlay keeps its children at alpha 1 inside a
+     * transparent parent, so the parent's alpha must be accumulated.
+     */
+    private String visibleControl(View view, float parentAlpha) {
+        if (view == null || view == pill) return null;
+        float alpha = parentAlpha * view.getAlpha();
+        if (view.getVisibility() != View.VISIBLE || alpha <= 0.05f) return null;
+        boolean match = false;
+        String why = null;
         if (view instanceof AbsSeekBar || view instanceof Button || view instanceof ImageButton
                 || view instanceof AdapterView) {
-            return view.getWidth() > 0 && view.getHeight() > 0;
-        }
-        String cls = view.getClass().getSimpleName().toLowerCase(Locale.US);
-        if (cls.contains("seekbar") || cls.contains("timebar") || cls.contains("recyclerview")
-                || cls.contains("controllerview") || cls.contains("playercontrol")) {
-            return view.getWidth() > 0 && view.getHeight() > 0;
-        }
-        int id = view.getId();
-        if (id != View.NO_ID && id != android.R.id.content) {
-            try {
-                String name = view.getResources().getResourceEntryName(id).toLowerCase(Locale.US);
-                if (name.contains("seekbar") || name.contains("seek_bar") || name.contains("timebar")
-                        || name.contains("control_panel") || name.contains("controls")
-                        || name.contains("osd") || name.contains("controller")
-                        || name.contains("transport") || name.contains("bottom_panel")
-                        || name.contains("top_panel") || name.contains("info_panel")) {
-                    return view.getWidth() > 0 && view.getHeight() > 0;
+            match = true;
+            why = view.getClass().getName();
+        } else {
+            String cls = view.getClass().getSimpleName().toLowerCase(Locale.US);
+            if (cls.contains("seekbar") || cls.contains("timebar") || cls.contains("recyclerview")
+                    || cls.contains("controllerview") || cls.contains("playercontrol")) {
+                match = true;
+                why = view.getClass().getName();
+            } else {
+                int id = view.getId();
+                // A named container is always present; only its visible children count.
+                if (id != View.NO_ID && id != android.R.id.content && !(view instanceof ViewGroup)) {
+                    try {
+                        String name = view.getResources().getResourceEntryName(id).toLowerCase(Locale.US);
+                        if (name.contains("seekbar") || name.contains("seek_bar") || name.contains("timebar")
+                                || name.contains("control_panel") || name.contains("controls")
+                                || name.contains("osd") || name.contains("controller")
+                                || name.contains("transport") || name.contains("bottom_panel")
+                                || name.contains("top_panel") || name.contains("info_panel")) {
+                            match = true;
+                            why = "id " + name;
+                        }
+                    } catch (Throwable ignored) {
+                    }
                 }
-            } catch (Throwable ignored) {
             }
+        }
+        if (match && view.getWidth() > 0 && view.getHeight() > 0
+                && view.getGlobalVisibleRect(new android.graphics.Rect())) {
+            return why + " alpha=" + alpha;
         }
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
             int count = group.getChildCount();
             for (int i = 0; i < count; i++) {
-                if (hasVisibleControlView(group.getChildAt(i))) return true;
+                String found = visibleControl(group.getChildAt(i), alpha);
+                if (found != null) return found;
             }
         }
-        return false;
+        return null;
     }
 
     private static int dp(Activity activity, int value) {
@@ -893,6 +948,59 @@ public final class IntroSkip implements Runnable {
         }, "IntroSkipRemote").start();
     }
 
+    /**
+     * True when the playing intent identifies an episode: SxxEyy, 1x05, Episode 5 / Ep 05, the
+     * anime " - 05 " style (all via parseCandidate), or a season/episode passed as extras.
+     * Anything else is treated as a movie.
+     */
+    private static boolean isEpisodeIntent(Intent intent) {
+        if (intent == null) return false;
+        try {
+            if (extractMediaFromIntent(intent) != null) return true;
+            Uri data = intent.getData();
+            if (data != null) {
+                String type = data.getQueryParameter("media_type");
+                if (type != null) {
+                    type = type.trim().toLowerCase(Locale.US);
+                    if (type.equals("series") || type.equals("tv") || type.equals("show") || type.equals("anime")) {
+                        return true;
+                    }
+                }
+            }
+            Bundle extras = intent.getExtras();
+            if (extras != null) {
+                for (String key : new String[]{"season", "episode", "episode_number", "episodeNumber",
+                        "season_number", "seasonNumber"}) {
+                    Object v = extras.get(key);
+                    if (v instanceof Number && ((Number) v).intValue() > 0) return true;
+                    if (v instanceof String && safeParseInt(((String) v).trim(), -1) > 0) return true;
+                }
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "isEpisodeIntent", error);
+        }
+        return false;
+    }
+
+    private static String describeIntent(Intent intent) {
+        StringBuilder out = new StringBuilder();
+        try {
+            if (intent == null) return "null";
+            Uri data = intent.getData();
+            out.append("path=").append(data == null ? "" : urlDecode(String.valueOf(data.getLastPathSegment())));
+            Bundle extras = intent.getExtras();
+            if (extras != null) {
+                for (String key : extras.keySet()) {
+                    String v = String.valueOf(extras.get(key));
+                    out.append(" | ").append(key).append('=').append(v.length() > 80 ? v.substring(0, 80) : v);
+                }
+            }
+        } catch (Throwable error) {
+            out.append(" error ").append(error);
+        }
+        return out.toString();
+    }
+
     private static ParsedMedia extractMediaFromIntent(Intent intent) {
         if (intent == null) return null;
         List<String> candidates = new ArrayList<>();
@@ -903,7 +1011,7 @@ public final class IntroSkip implements Runnable {
             }
             Uri uri = intent.getData();
             if (uri != null) {
-                for (String key : new String[]{"title", "name", "filename", "file", "torrentName"}) {
+                for (String key : new String[]{"title", "name", "filename", "file", "torrentName", "torrent_name"}) {
                     try {
                         String q = uri.getQueryParameter(key);
                         if (q != null && q.trim().length() > 0) candidates.add(q.trim());
@@ -1765,6 +1873,7 @@ public final class IntroSkip implements Runnable {
     }
 
     private void resetMedia() {
+        mediaKind = 0;
         skipped.clear();
         segments = null;
         chaptersHaveIntro = false;

@@ -213,6 +213,7 @@ public final class IntroSkipBridge {
         private int mediaGeneration;
         private long skippedAt;
         private boolean chaptersRequested;
+        private boolean movie;
         private boolean chaptersDone;
         private long chaptersStartedAt;
         private List<MkvChapters.Chapter> chapters;
@@ -319,6 +320,7 @@ public final class IntroSkipBridge {
             infoAttempts = 0;
             fetchGeneration++;
             mediaGeneration++;
+            movie = false;
             segments.clear();
             autoSkipped.clear();
             jumpSkips.clear();
@@ -436,6 +438,14 @@ public final class IntroSkipBridge {
                 return;
             }
             resolveMedia(now, durationMs);
+            if (movie) {
+                // Movies are never skipped: no segments, no pill, no lookups.
+                current = null;
+                lastPos = pos;
+                lastPollAt = now;
+                if (pillShown) hidePill(true);
+                return;
+            }
             combine(now);
 
             long elapsed = lastPollAt == 0 ? POLL_MS : now - lastPollAt;
@@ -621,6 +631,12 @@ public final class IntroSkipBridge {
                 resetMedia();
             }
             identity = id;
+            if (movie) return;
+            String[] stremioKind = stremioVideoId(anchor);
+            if (stremioKind != null && parseInt(stremioKind[1]) == 0 && parseInt(stremioKind[2]) == 0) {
+                markMovie();
+                return;
+            }
             if (!chaptersRequested) {
                 chaptersRequested = true;
                 startChapters(item == null || item.localConfiguration == null ? null
@@ -645,11 +661,9 @@ public final class IntroSkipBridge {
                     // reveal their number on the first scans, so this never fires
                     // for them; chapters and AniSkip are unaffected either way.
                     if (info.title.length() > 0 && info.episode <= 0 && infoAttempts >= 6) {
-                        pendingInfo = info;
-                        readySince = now;
-                    } else {
-                        return;
+                        markMovie();
                     }
+                    return;
                 } else {
                     pendingInfo = info;
                     readySince = now;
@@ -659,6 +673,22 @@ public final class IntroSkipBridge {
             // submission measured on our cut is what puts the skip on the right seconds.
             if (durationMs <= 0 && now - readySince < 8000L) return;
             startFetch(pendingInfo, durationMs > 0 ? Math.round(durationMs / 1000.0) : 0L);
+        }
+
+        /** A movie: drop everything that could skip and stop all lookups until the media changes. */
+        private void markMovie() {
+            movie = true;
+            fetchGeneration++;
+            mediaGeneration++;
+            segments.clear();
+            autoSkipped.clear();
+            chapters = null;
+            online = null;
+            onlineSource = null;
+            appliedSignature = null;
+            current = null;
+            hidePill(false);
+            log("movie, skipping disabled");
         }
 
         private void startFetch(MediaInfo info, final long episodeLength) {
