@@ -82,6 +82,20 @@ public final class IntroSkip implements Runnable {
     private static final Pattern IMDB_ID = Pattern.compile("(?i)(tt\\d{7,})");
     private static final Pattern YEAR = Pattern.compile("\\b(19\\d{2}|20\\d{2})\\b");
 
+    // ---- Stremio hand-off extras (set from w1 via capture, used before filename parsing) ----
+    private static volatile boolean extHaveMedia;
+    private static volatile String extMediaType = "";
+    private static volatile int extSeason = -1;
+    private static volatile int extEpisode = -1;
+    private static volatile String extImdbId = "";
+    private static volatile String extTitle = "";
+    private static volatile boolean extHaveSub;
+    private static volatile String extSubUrl = "";
+    private static volatile String extSubLang = "";
+    private static volatile String extSubLabel = "";
+    private static volatile String extSubId = "";
+    private static volatile int extSubIndex = -1;
+
     private static final WeakHashMap<PlayerFragment, IntroSkip> ACTIVE = new WeakHashMap<>();
     private static final Map<String, String> MAL_CACHE = new ConcurrentHashMap<>();
     private static final Object CINEMETA_LOCK = new Object();
@@ -146,6 +160,10 @@ public final class IntroSkip implements Runnable {
     private int durationMs = Integer.MIN_VALUE;
     private List<Seg> segments;
     private int mediaKind; // 0 unknown, 1 episode, 2 movie
+    /** Pending Stremio subtitle choice: applied once the player lists its tracks. */
+    private boolean subApplied;
+    private int subTries;
+    private boolean subLogged;
     private boolean chaptersHaveIntro;
     /** Online timestamps (AniSkip or IntroDB) for the episode; used when chapters give no intro. */
     private volatile List<Seg> remote;
@@ -262,6 +280,97 @@ public final class IntroSkip implements Runnable {
 
     private IntroSkip(PlayerFragment fragment) {
         this.fragment = new WeakReference<>(fragment);
+    }
+
+    /**
+     * Hook in PlayerFragment.w1 (runs in onCreate): reads the hand-off extras Stremio put on the
+     * launch Intent and bridges the addon subtitle URL to Vimu's own forcedsrt flow, which the
+     * player picks up when playback starts. Always resets the hand-off state, so a launch
+     * without extras never reuses a previous one.
+     */
+    public static void capture(Object fragment, Bundle extras) {
+        extHaveMedia = false;
+        extMediaType = "";
+        extSeason = -1;
+        extEpisode = -1;
+        extImdbId = "";
+        extTitle = "";
+        extHaveSub = false;
+        extSubUrl = "";
+        extSubLang = "";
+        extSubLabel = "";
+        extSubId = "";
+        extSubIndex = -1;
+        try {
+            if (extras == null) {
+                return;
+            }
+            extMediaType = safeLower(extras.getString("media_type"));
+            extSeason = extras.getInt("season", -1);
+            extEpisode = extras.getInt("episode", -1);
+            extImdbId = safeLower(extras.getString("imdb_id"));
+            extTitle = safe(extras.getString("title"));
+            Object[] enable = null;
+            try {
+                enable = extras.getParcelableArray("subs.enable");
+            } catch (Throwable ignored) {
+            }
+            if (enable != null) {
+                for (Object one : enable) {
+                    if (one != null) {
+                        extSubUrl = safe(one.toString());
+                        break;
+                    }
+                }
+            }
+            extSubLang = safe(extras.getString("sub_lang"));
+            extSubLabel = safe(extras.getString("sub_label"));
+            extSubId = safe(extras.getString("sub_track_id"));
+            extSubIndex = extras.getInt("sub_track_index", -1);
+            extHaveMedia = extMediaType.length() > 0 || extImdbId.length() > 0 || extEpisode > 0;
+            extHaveSub = extSubUrl.length() > 0 || extSubLang.length() > 0
+                    || extSubLabel.length() > 0 || extSubId.length() > 0 || extSubIndex >= 0;
+            Log.i(TAG, "handoff media_type=" + extMediaType + " imdb=" + extImdbId
+                    + " S" + extSeason + "E" + extEpisode + " title=" + clip(extTitle)
+                    + " sub=" + (extSubUrl.length() > 0 ? extSubUrl : "")
+                    + (extSubLang.length() + extSubLabel.length() + extSubId.length() > 0
+                    ? " embedded[" + extSubIndex + "] lang=" + extSubLang
+                    + " label=" + clip(extSubLabel) + " id=" + clip(extSubId) : ""));
+            if (extSubUrl.length() > 0 && fragment instanceof PlayerFragment) {
+                try {
+                    Activity activity = ((PlayerFragment) fragment).getActivity();
+                    Intent intent = activity == null ? null : activity.getIntent();
+                    if (intent != null && !intent.hasExtra("forcedsrt")) {
+                        intent.putExtra("forcedsrt", extSubUrl);
+                        Log.i(TAG, "handoff: addon subtitles via forcedsrt");
+                    }
+                } catch (Throwable error) {
+                    Log.w(TAG, "forcedsrt", error);
+                }
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "capture", error);
+        }
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static String safeLower(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.US);
+    }
+
+    private static String clip(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.length() <= 80 ? value : value.substring(0, 80);
+    }
+
+    private static boolean isSeriesType(String mediaType) {
+        return mediaType.contains("series") || mediaType.contains("tv")
+                || mediaType.contains("show") || mediaType.contains("anime");
     }
 
     public static void start(PlayerFragment f) {
@@ -454,6 +563,7 @@ public final class IntroSkip implements Runnable {
             if (pillShown) hidePill(true);
             return;
         }
+        applyPendingSub(f, p);
         long now = SystemClock.uptimeMillis();
         int duration = p.getDuration();
         if (p != player) {
@@ -955,6 +1065,13 @@ public final class IntroSkip implements Runnable {
      */
     private static boolean isEpisodeIntent(Intent intent) {
         if (intent == null) return false;
+        // Stremio's own answer wins over filename parsing: a series stays a series even when
+        // the file name carries no episode marker ("Frieren - Beyond Journey's End 02.mkv").
+        if (extHaveMedia) {
+            if (isSeriesType(extMediaType)) return true;
+            if (extEpisode > 0) return true;
+            return false;
+        }
         try {
             if (extractMediaFromIntent(intent) != null) return true;
             Uri data = intent.getData();
@@ -1001,8 +1118,25 @@ public final class IntroSkip implements Runnable {
         return out.toString();
     }
 
+    /** Media identity handed over by Stremio, used before any filename parsing. */
+    private static ParsedMedia handedMedia() {
+        if (!extHaveMedia) return null;
+        if (extEpisode > 0 && (extTitle.length() > 0 || extImdbId.length() > 0)) {
+            String title = extTitle.length() > 0 ? extTitle : extImdbId;
+            ParsedMedia media = new ParsedMedia(title, extSeason > 0 ? extSeason : 1,
+                    extEpisode, null, false, "stremio-extra");
+            if (extImdbId.startsWith("tt")) {
+                media.imdbId = extImdbId;
+            }
+            return media;
+        }
+        return null;
+    }
+
     private static ParsedMedia extractMediaFromIntent(Intent intent) {
         if (intent == null) return null;
+        ParsedMedia handed = handedMedia();
+        if (handed != null) return handed;
         List<String> candidates = new ArrayList<>();
         try {
             for (String key : new String[]{"title", "forcename", "name", "filename", "file_name", "video_title"}) {
@@ -1874,6 +2008,9 @@ public final class IntroSkip implements Runnable {
 
     private void resetMedia() {
         mediaKind = 0;
+        subApplied = false;
+        subTries = 0;
+        subLogged = false;
         skipped.clear();
         segments = null;
         chaptersHaveIntro = false;
@@ -1933,6 +2070,173 @@ public final class IntroSkip implements Runnable {
         } catch (Throwable error) {
             Log.w(TAG, "notice", error);
         }
+    }
+
+    /**
+     * Selects the subtitle Stremio handed over: addon URLs already ride Vimu's own forcedsrt
+     * flow (set in capture), embedded file tracks are matched by id, then label and language,
+     * then position, through Vimu's track API (G0 lists, O0 selects, L reports the current).
+     * Retried while the track list is still loading, then left alone.
+     */
+    private void applyPendingSub(PlayerFragment f, e p) {
+        if (!extHaveSub || subApplied) return;
+        if (extSubUrl.length() > 0) {
+            if (!subLogged) {
+                subLogged = true;
+                Log.i(TAG, "Subtitle: addon URL rides forcedsrt");
+            }
+            subApplied = true;
+            return;
+        }
+        if (subTries >= 10) {
+            if (!subLogged) {
+                subLogged = true;
+                Log.i(TAG, "Subtitle: no match for lang=" + extSubLang
+                        + " label=" + clip(extSubLabel) + " id=" + clip(extSubId)
+                        + " index=" + extSubIndex);
+            }
+            return;
+        }
+        subTries++;
+        int count = internalSubCount(p);
+        if (count < 0) return; // track list not parsed yet
+        if (count == 0) {
+            subApplied = true;
+            Log.i(TAG, "Subtitle: file has no subtitle tracks");
+            return;
+        }
+        int want = -1;
+        String why = "";
+        for (int i = 1; i <= count; i++) {
+            if (extSubId.length() > 0 && trackIdMatch(p, i - 1, extSubId)) {
+                want = i;
+                why = "id";
+                break;
+            }
+        }
+        if (want < 0) {
+            for (int i = 1; i <= count; i++) {
+                if (trackLabelLangMatch(p, i, extSubLang, extSubLabel)) {
+                    want = i;
+                    why = "label+language";
+                    break;
+                }
+            }
+        }
+        if (want < 0 && extSubIndex >= 0 && extSubIndex + 1 <= count) {
+            want = extSubIndex + 1;
+            why = "index";
+        }
+        if (want < 0) return; // matches nothing yet, retry while chapters load
+        try {
+            if (p.L() == want) {
+                subApplied = true;
+                Log.i(TAG, "Subtitle: already selected track " + want);
+                return;
+            }
+            p.O0(want);
+            if (p.L() == want) {
+                subApplied = true;
+                String name = "";
+                try {
+                    name = p.G0(want);
+                } catch (Throwable ignored) {
+                }
+                Log.i(TAG, "Subtitle: selected track " + want + " (" + why + ") '" + clip(name) + "'");
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "Subtitle select", error);
+        }
+    }
+
+    /** Number of internal subtitle tracks (dialog numbers 1..n), or -1 while unknown. */
+    private static int internalSubCount(e p) {
+        try {
+            Object tracks = readPlayerField(p, "K");
+            if (tracks == null) return -1;
+            Object array = readField(tracks, "d");
+            if (array == null) return -1;
+            return java.lang.reflect.Array.getLength(array);
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    /** True when the Stremio track id equals one of the Vimu track fields. */
+    private static boolean trackIdMatch(e p, int track, String id) {
+        try {
+            Object tracks = readPlayerField(p, "K");
+            Object array = readField(tracks, "d");
+            Object one = java.lang.reflect.Array.get(array, track);
+            for (String field : new String[]{"c", "d", "h"}) {
+                Object value = readField(one, field);
+                if (value instanceof String && id.equalsIgnoreCase((String) value)) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    /** Language must match (tolerant); the label only narrows it down when Stremio sent one. */
+    private static boolean trackLabelLangMatch(e p, int dialog, String lang, String label) {
+        try {
+            Object tracks = readPlayerField(p, "K");
+            Object array = readField(tracks, "d");
+            Object one = java.lang.reflect.Array.get(array, dialog - 1);
+            Object trackLang = readField(one, "d");
+            Object trackLabel = readField(one, "c");
+            if (!langMatch(lang, trackLang instanceof String ? (String) trackLang : "")) return false;
+            if (label.length() == 0) return true;
+            String labelLower = label.toLowerCase(Locale.US);
+            String code = trackLabel instanceof String ? ((String) trackLabel).toLowerCase(Locale.US) : "";
+            if (code.contains(labelLower)) return true;
+            String display = "";
+            try {
+                display = p.G0(dialog);
+            } catch (Throwable ignored) {
+            }
+            return display.toLowerCase(Locale.US).contains(labelLower);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** ISO language match: "en" equals "eng" equals "English". Empty Stremio side never matches. */
+    private static boolean langMatch(String a, String b) {
+        if (a == null || b == null) return false;
+        String left = a.trim().toLowerCase(Locale.US);
+        String right = b.trim().toLowerCase(Locale.US);
+        if (left.length() == 0 || right.length() == 0) return false;
+        if (left.equals(right)) return true;
+        return iso3(left).equals(iso3(right));
+    }
+
+    private static String iso3(String lang) {
+        try {
+            if (lang.length() == 2) return new Locale(lang).getISO3Language().toLowerCase(Locale.US);
+            Locale locale = new Locale(lang);
+            String iso3 = locale.getISO3Language().toLowerCase(Locale.US);
+            if (iso3.length() > 0 && !iso3.equals(lang)) return iso3;
+        } catch (Throwable ignored) {
+        }
+        return lang;
+    }
+
+    private static Object readPlayerField(e p, String name) throws Exception {
+        return readField(p, name);
+    }
+
+    private static Object readField(Object target, String name) throws Exception {
+        for (Class<?> current = target.getClass(); current != null;
+                current = current.getSuperclass()) {
+            try {
+                java.lang.reflect.Field field = current.getDeclaredField(name);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (NoSuchFieldException ignored) {
+            }
+        }
+        throw new NoSuchFieldException(name);
     }
 
     private void readChapters(e p, int duration) {

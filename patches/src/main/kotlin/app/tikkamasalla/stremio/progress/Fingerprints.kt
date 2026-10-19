@@ -6,6 +6,13 @@ private const val CONTRACT = "Lcom/stremio/common/players/ExternalPlayerContract
 private const val INPUT = "Lcom/stremio/common/players/ExternalPlayerContract\$ExternalPlayerInput;"
 private const val RESULT = "Lcom/stremio/common/players/ExternalPlayerContract\$ExternalPlayerResult;"
 
+/** "Play in external player" inside the player: snapshot media and subtitle state first. */
+object OpenInExternalPlayerFingerprint : Fingerprint(
+    definingClass = "Lcom/stremio/tv/views/player/PlayerFragment;",
+    name = "openInExternalPlayer",
+    parameters = listOf("Ljava/lang/Long;"),
+)
+
 /** Builds the Intent that starts the external player. */
 object CreateIntentFingerprint : Fingerprint(
     definingClass = CONTRACT,

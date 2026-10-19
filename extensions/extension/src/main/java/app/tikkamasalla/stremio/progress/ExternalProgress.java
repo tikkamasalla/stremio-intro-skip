@@ -8,20 +8,195 @@ import android.os.Bundle;
 import android.util.Log;
 
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import androidx.media3.common.Format;
+import androidx.media3.common.Player;
+import androidx.media3.common.Tracks;
 
 /**
  * Makes Stremio keep watch progress when an external player is used. Called from small hooks in
  * ExternalPlayerContract (launch and result) and StremioApi.playerTimeChanged (log only).
- * Every entry point fails soft: on any problem the original Stremio code path runs unchanged.
+ * Also passes media identity and the selected subtitle to the external player, so Vimu, MX Player
+ * and mpv start with the right show, episode and subtitle. Every entry point fails soft: on any
+ * problem the original Stremio code path runs unchanged.
  */
 public final class ExternalProgress {
     private static final String TAG = "ExtProgress";
     private static final String RESULT_CLASS =
             "com.stremio.common.players.ExternalPlayerContract$ExternalPlayerResult";
+    private static final Pattern VIDEO_ID =
+            Pattern.compile("(?i)^(tt\\d+)(?::(\\d+):(\\d+))?$");
+    private static final long SNAPSHOT_TTL_MS = 120000L;
 
     private static volatile Context appContext;
 
+    // Snapshot taken when the user picks "Play in external player", consumed by decorate().
+    private static volatile long capturedAt;
+    private static volatile String capMediaType = "";
+    private static volatile String capImdb = "";
+    private static volatile String capTitle = "";
+    private static volatile int capSeason;
+    private static volatile int capEpisode;
+    private static volatile String[] capSubUris = new String[0];
+    private static volatile String[] capSubNames = new String[0];
+    private static volatile String capEnableUri = "";
+    private static volatile String capSubLang = "";
+    private static volatile String capSubLabel = "";
+    private static volatile String capSubTrackId = "";
+    private static volatile int capSubIndex = -1;
+
     private ExternalProgress() {
+    }
+
+    /**
+     * Hook at the start of PlayerFragment.openInExternalPlayer: snapshots media identity
+     * (series/movie, season, episode, IMDb id, show name) and the selected subtitle from the
+     * playing state, so decorate() can hand them to the external player. The resolve callback
+     * that builds the launch Intent runs later, which is why this is a snapshot, not a return.
+     */
+    public static void captureExternal(Object fragment) {
+        try {
+            if (fragment == null) {
+                return;
+            }
+            Object args = invoke(fragment, "getArgs");
+            String videoId = args == null ? "" : string(invoke(args, "getVideoId"));
+            Object viewModel = invoke(fragment, "getViewModel");
+            Object state = null;
+            if (viewModel != null) {
+                Object flow = invoke(viewModel, "getState");
+                if (flow != null) {
+                    state = invoke(flow, "getValue");
+                }
+            }
+            Object meta = state == null ? null : invoke(state, "getMetaItem");
+            Object video = state == null ? null : invoke(state, "getCurrentVideo");
+            String metaType = meta == null ? "" : string(invoke(meta, "getType"));
+            String metaName = meta == null ? "" : string(invoke(meta, "getName"));
+            String videoTitle = video == null ? "" : string(invoke(video, "getTitle"));
+
+            String imdb = "";
+            int season = 0;
+            int episode = 0;
+            if (videoId.length() > 0) {
+                Matcher id = VIDEO_ID.matcher(videoId.trim());
+                if (id.find()) {
+                    imdb = safe(id.group(1)).toLowerCase(java.util.Locale.US);
+                    season = parseInt(id.group(2));
+                    episode = parseInt(id.group(3));
+                }
+            }
+
+            String mediaType = normalizeMediaType(metaType, season, episode);
+            String title = metaName.length() > 0 ? metaName : videoTitle;
+
+            // Addon subtitles known to the player state, with the proxied (playable) URIs.
+            List<String> subUris = new ArrayList<>();
+            List<String> subNames = new ArrayList<>();
+            List<String> subOrigins = new ArrayList<>();
+            try {
+                Object subs = state == null ? null : invoke(state, "getSubtitles");
+                if (subs instanceof Map && viewModel != null) {
+                    for (Map.Entry<?, ?> entry : ((Map<?, ?>) subs).entrySet()) {
+                        Object list = entry.getValue();
+                        if (!(list instanceof List)) {
+                            continue;
+                        }
+                        for (Object sub : (List<?>) list) {
+                            if (sub == null) {
+                                continue;
+                            }
+                            Object uri = null;
+                            try {
+                                uri = invoke(viewModel, "proxiedSubtitlesUri", sub);
+                            } catch (Throwable ignored) {
+                            }
+                            if (uri == null) {
+                                continue;
+                            }
+                            subUris.add(String.valueOf(uri));
+                            subNames.add(string(invoke(sub, "getName")));
+                            subOrigins.add(string(invoke(sub, "getUrl")));
+                        }
+                    }
+                }
+            } catch (Throwable error) {
+                Log.w(TAG, "capture subtitles", error);
+            }
+
+            // The selected text track: an addon subtitle when its id matches one of the
+            // addon URLs (Stremio sets the track id to the subtitle URL), else embedded.
+            String enableUri = "";
+            String subLang = "";
+            String subLabel = "";
+            String subTrackId = "";
+            int subIndex = -1;
+            try {
+                Object playerObject = field(fragment, "player");
+                if (playerObject instanceof Player) {
+                    Tracks tracks = ((Player) playerObject).getCurrentTracks();
+                    int textIndex = 0;
+                    for (Tracks.Group group : tracks.getGroups()) {
+                        if (group.getType() != 3) {
+                            continue;
+                        }
+                        for (int i = 0; i < group.length; i++) {
+                            if (!group.isTrackSelected(i)) {
+                                textIndex++;
+                                continue;
+                            }
+                            Format format = group.getTrackFormat(i);
+                            String id = format == null ? "" : safe(format.id);
+                            String match = "";
+                            for (int j = 0; j < subOrigins.size(); j++) {
+                                if (id.length() > 0 && id.equals(subOrigins.get(j))) {
+                                    match = subUris.get(j);
+                                    break;
+                                }
+                            }
+                            if (match.length() > 0) {
+                                enableUri = match;
+                            } else {
+                                subLang = format == null ? "" : safe(format.language);
+                                subLabel = format == null ? "" : safe(format.label);
+                                subTrackId = id;
+                                subIndex = textIndex;
+                            }
+                            textIndex++;
+                        }
+                    }
+                }
+            } catch (Throwable error) {
+                Log.w(TAG, "capture selection", error);
+            }
+
+            capMediaType = mediaType;
+            capImdb = imdb;
+            capTitle = title;
+            capSeason = season;
+            capEpisode = episode;
+            capSubUris = subUris.toArray(new String[0]);
+            capSubNames = subNames.toArray(new String[0]);
+            capEnableUri = enableUri;
+            capSubLang = subLang;
+            capSubLabel = subLabel;
+            capSubTrackId = subTrackId;
+            capSubIndex = subIndex;
+            capturedAt = System.currentTimeMillis();
+            Log.i(TAG, "capture type=" + mediaType + " imdb=" + imdb + " S" + season + "E" + episode
+                    + " title=" + clip(title) + " subs=" + subUris.size()
+                    + " enable=" + (enableUri.length() > 0 ? "addon" : "")
+                    + (subIndex >= 0 ? " embedded[" + subIndex + "]" : ""));
+        } catch (Throwable error) {
+            Log.w(TAG, "captureExternal", error);
+        }
     }
 
     /** Hook at the start of createIntent: keeps a Context to resolve the target player. */
@@ -44,6 +219,7 @@ public final class ExternalProgress {
             if (intent == null || !intent.hasExtra("return_result")) {
                 return; // the YouTube branch, not a player launch
             }
+            applyHandoff(intent);
             int position = intent.getIntExtra("startfrom", 0);
             intent.putExtra("return_result", true);
             intent.putExtra("startfrom", position);
@@ -59,6 +235,159 @@ public final class ExternalProgress {
         } catch (Throwable error) {
             Log.w(TAG, "decorate", error);
         }
+    }
+
+    /**
+     * Adds the captureExternal() snapshot to the launch Intent: media identity for every player,
+     * the MX/mpv subtitle lists with the selected addon subtitle, and the embedded track
+     * details when the selection is a file track. Consumes the snapshot so a later launch
+     * never reuses it.
+     */
+    private static void applyHandoff(Intent intent) {
+        try {
+            if (System.currentTimeMillis() - capturedAt > SNAPSHOT_TTL_MS) {
+                return;
+            }
+            capturedAt = 0L;
+            if (capMediaType.length() > 0) {
+                intent.putExtra("media_type", capMediaType);
+            }
+            if ("series".equals(capMediaType) && capEpisode > 0) {
+                intent.putExtra("season", capSeason > 0 ? capSeason : 1);
+                intent.putExtra("episode", capEpisode);
+            }
+            if (capImdb.length() > 0) {
+                intent.putExtra("imdb_id", capImdb);
+            }
+            if (capTitle.length() > 0) {
+                intent.putExtra("title", capTitle);
+            }
+            if (capSubUris.length > 0) {
+                android.net.Uri[] uris = new android.net.Uri[capSubUris.length];
+                for (int i = 0; i < capSubUris.length; i++) {
+                    uris[i] = android.net.Uri.parse(capSubUris[i]);
+                }
+                intent.putExtra("subs", uris);
+                intent.putExtra("subs.name", capSubNames);
+                if (capEnableUri.length() > 0) {
+                    intent.putExtra("subs.enable",
+                            new android.net.Uri[]{android.net.Uri.parse(capEnableUri)});
+                }
+            }
+            if (capSubIndex >= 0) {
+                intent.putExtra("sub_lang", capSubLang);
+                intent.putExtra("sub_label", capSubLabel);
+                intent.putExtra("sub_track_index", capSubIndex);
+                intent.putExtra("sub_track_id", capSubTrackId);
+            }
+            Log.i(TAG, "handoff type=" + capMediaType + " subs=" + capSubUris.length
+                    + " enable=" + (capEnableUri.length() > 0)
+                    + " embedded=" + (capSubIndex >= 0));
+        } catch (Throwable error) {
+            Log.w(TAG, "applyHandoff", error);
+        }
+    }
+
+    private static String normalizeMediaType(String metaType, int season, int episode) {
+        String type = safe(metaType).toLowerCase(java.util.Locale.US);
+        if (type.contains("series") || type.contains("show") || type.contains("anime")
+                || type.equals("tv")) {
+            return "series";
+        }
+        if (type.contains("movie") || type.contains("film")) {
+            return "movie";
+        }
+        return episode > 0 ? "series" : "movie";
+    }
+
+    private static Object invoke(Object target, String name, Object... args) throws Exception {
+        Class<?>[] types = new Class<?>[args.length];
+        for (int i = 0; i < args.length; i++) {
+            types[i] = args[i] == null ? Object.class : args[i].getClass();
+        }
+        Class<?> type = target instanceof Class ? (Class<?>) target : target.getClass();
+        Object receiver = target instanceof Class ? null : target;
+        Method method = exactMethod(type, name, types);
+        if (method == null) {
+            method = compatibleMethod(type, name, args);
+        }
+        if (method == null) {
+            throw new NoSuchMethodException(type.getName() + "." + name);
+        }
+        method.setAccessible(true);
+        return method.invoke(receiver, args);
+    }
+
+    private static Method exactMethod(Class<?> type, String name, Class<?>[] types) {
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            try {
+                return current.getDeclaredMethod(name, types);
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        return null;
+    }
+
+    /** Name and arity match where each parameter accepts the runtime argument (subclasses ok). */
+    private static Method compatibleMethod(Class<?> type, String name, Object[] args) {
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            for (Method candidate : current.getDeclaredMethods()) {
+                if (!candidate.getName().equals(name)) {
+                    continue;
+                }
+                Class<?>[] params = candidate.getParameterTypes();
+                if (params.length != args.length) {
+                    continue;
+                }
+                boolean ok = true;
+                for (int i = 0; i < params.length; i++) {
+                    if (args[i] != null && !params[i].isAssignableFrom(args[i].getClass())) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) {
+                    return candidate;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Object field(Object target, String name) throws Exception {
+        for (Class<?> current = target.getClass(); current != null;
+                current = current.getSuperclass()) {
+            try {
+                Field field = current.getDeclaredField(name);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (NoSuchFieldException ignored) {
+            }
+        }
+        throw new NoSuchFieldException(name);
+    }
+
+    private static String string(Object value) {
+        return value == null ? "" : safe(String.valueOf(value));
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static int parseInt(String value) {
+        try {
+            return Integer.parseInt(value);
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    private static String clip(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.length() <= 80 ? value : value.substring(0, 80);
     }
 
     /**

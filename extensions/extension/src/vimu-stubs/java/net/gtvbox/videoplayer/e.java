@@ -13,4 +13,17 @@ public interface e {
     boolean isPlaying();
 
     void seekTo(int positionMs);
+
+    // Subtitle track API (PlayerFragment subtitle list and selection).
+    int L();
+
+    int n0();
+
+    String G0(int index);
+
+    void O0(int index);
+
+    boolean q0();
+
+    void L0(String path);
 }
