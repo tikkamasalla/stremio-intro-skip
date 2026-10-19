@@ -2846,7 +2846,8 @@ public final class IntroSkipBridge {
      * Keyless extra source, no key needed: GET /segments?imdb_id=&season=&episode
      * answers {"intro": {"start_ms","end_ms",...}, "recap": {...}, "outro": {...},
      * "post_credits": {...}} with null for unknown types. Mapping: intro to OP,
-     * recap to recap, outro/credits to credits, post_credits to preview.
+     * recap to recap, outro/credits to credits. post_credits is ignored on purpose:
+     * post-credit scenes must never be skippable.
      */
     private static List<Segment> fetchIntroDbApp(String imdbId, int season, int episode,
                                                  DebugLogger logger) {
@@ -2858,7 +2859,6 @@ public final class IntroSkipBridge {
             addAppSegment(out, response, "recap", "recap", logger);
             addAppSegment(out, response, "outro", "credits", logger);
             addAppSegment(out, response, "credits", "credits", logger);
-            addAppSegment(out, response, "post_credits", "preview", logger);
         } catch (Exception error) {
             logger.log("ERROR IntroDB.app: " + error.getClass().getSimpleName() + ": " + safe(error.getMessage()));
         }

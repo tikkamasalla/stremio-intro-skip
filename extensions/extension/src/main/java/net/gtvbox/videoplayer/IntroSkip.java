@@ -249,8 +249,9 @@ public final class IntroSkip implements Runnable {
             return name != null && name.toLowerCase(Locale.US).matches(".*(recap|previously|あらすじ).*");
         }
 
+        /** Only the online "Credits" segments: a chapter named "Opening Credits" is a title sequence. */
         boolean credits() {
-            return name != null && name.toLowerCase(Locale.US).matches(".*(credits|outro).*");
+            return "Credits".equals(name) && rule != null && rule.startsWith("introdb");
         }
 
         String buttonText() {
@@ -768,7 +769,10 @@ public final class IntroSkip implements Runnable {
         // Seeking before the decoder is really producing frames (the position still sits on the
         // resume point) crashed ExoPlayer natively on the TV, so wait for 4 polls of steady advance.
         boolean flowing = flowTicks >= 4;
-        boolean autoPending = seg != null && !manualMode && !currentBySeek && !skipped.contains(seg.key());
+        // Credits are never auto-skipped: button only.
+        boolean buttonOnly = seg != null && seg.credits();
+        boolean autoPending = seg != null && !manualMode && !currentBySeek && !buttonOnly
+                && !skipped.contains(seg.key());
         if (autoPending && playing && flowing) {
             hidePill(false);
             skip(f, p, seg, pos, true);
@@ -787,7 +791,7 @@ public final class IntroSkip implements Runnable {
             }
         }
 
-        boolean shouldShowPill = seg != null && playing && (manualMode || currentBySeek) && !autoPending;
+        boolean shouldShowPill = seg != null && playing && (manualMode || currentBySeek || buttonOnly) && !autoPending;
         if (shouldShowPill) {
             if (pillSegment != seg || !pillShown) {
                 showButton(f, activity, seg);
