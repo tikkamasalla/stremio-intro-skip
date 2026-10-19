@@ -20,6 +20,7 @@ I made this for my own TV. It just skips the boring bits so playback keeps going
 * Binge with external players: when an episode finishes in Vimu, MX Player, VLC or mpv, the next episode starts in the same player. Setting on/off (default on). Series only.
 * Remember tracks per show: reuses the last audio language and subtitle choice for other episodes of the same series. Setting on/off (default on).
 * Auto-pick best stream: plays the top ranked stream without showing the list. Cached first, then resolution, then HDR, then size. Setting on/off (default on) plus Always show stream list (default off).
+* Spoiler titles: when Hide spoilers is ON, unwatched episode titles show as Episode N in the row and header.
 * Vimu: intro skip with Skip button and Auto/Manual settings, crash fixes, and progress result.
 
 Tested on Stremio 1.6.12 (com.stremio.one, Android TV).

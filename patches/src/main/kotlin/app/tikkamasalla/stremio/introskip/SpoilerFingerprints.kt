@@ -29,3 +29,17 @@ object VideosListOnCreateObserverFingerprint : Fingerprint(
     name = "invokeSuspend",
     parameters = listOf("Ljava/lang/Object;"),
 )
+
+/** Episode label used by the header, the player and the episode dialog. */
+object VideoLabelFingerprint : Fingerprint(
+    definingClass = "Lcom/stremio/common/extensions/VideoExtKt;",
+    name = "getLabel",
+    parameters = listOf("Lcom/stremio/core/types/resource/Video;"),
+)
+
+/** Episode label with date used by the header. */
+object VideoLabelWithDateFingerprint : Fingerprint(
+    definingClass = "Lcom/stremio/common/extensions/VideoExtKt;",
+    name = "getLabelWithDate",
+    parameters = listOf("Lcom/stremio/core/types/resource/Video;"),
+)
