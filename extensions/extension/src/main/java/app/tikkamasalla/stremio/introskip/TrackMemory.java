@@ -57,6 +57,14 @@ public final class TrackMemory {
                 || v.contains(" hard of hearing") || v.equals("hi") || v.contains(" hi ");
     }
 
+    /** Track ids that are addon URLs say nothing about the content; only the label does. */
+    private static boolean isSdhId(String id) {
+        if (id == null) return false;
+        String v = id.toLowerCase(Locale.US);
+        if (v.startsWith("http://") || v.startsWith("https://")) return false;
+        return isSdh(v);
+    }
+
     private static String kindOf(String label) {
         if (label == null) return "full";
         String v = label.toLowerCase(Locale.US);
@@ -145,7 +153,7 @@ public final class TrackMemory {
                 prefs.edit().putString("track_audio_" + seriesId, language).apply();
                 Log.i(TAG, "audio " + seriesId + " -> " + language);
             } else if (type == C.TRACK_TYPE_TEXT) {
-                if (isSdh(label) || isSdh(trackId)) return;
+                if (isSdh(label) || isSdhId(trackId)) return;
                 prefs.edit().putString("track_sub_" + seriesId, language)
                         .putString("track_subkind_" + seriesId, kindOf(label)).apply();
                 Log.i(TAG, "subs " + seriesId + " -> " + language + " " + kindOf(label));
@@ -238,7 +246,7 @@ public final class TrackMemory {
                     Format format = group.getTrackFormat(i);
                     if (format == null) continue;
                     if (!langMatch(format.language, language)) continue;
-                    if (isSdh(format.label) || isSdh(format.id)) continue;
+                    if (isSdh(format.label) || isSdhId(format.id)) continue;
                     TrackSelectionOverride candidate =
                             new TrackSelectionOverride(group.getMediaTrackGroup(), i);
                     if (fallback == null) fallback = candidate;
