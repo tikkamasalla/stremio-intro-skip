@@ -63,7 +63,7 @@ public final class StreamAutoPick {
             }
             if (firstAt == null) firstAt = now;
             long elapsed = now - firstAt;
-            List<StreamRanker.Stream> candidates = toRanker(streams);
+            List<StreamRanker.Stream> candidates = toRanker(streams, metaNameOf(state));
             if (candidates.isEmpty()) return;
             List<StreamRanker.Ranked> ranked = StreamRanker.rank(candidates, isMovie(state));
             if (ranked.isEmpty()) return;
@@ -103,7 +103,7 @@ public final class StreamAutoPick {
                         if (seen == null || !seen.equals(videoId)) return;
                         List<Object> streams = currentStreams(fragment);
                         if (streams == null || streams.isEmpty()) return;
-                        List<StreamRanker.Stream> candidates = toRanker(streams);
+                        List<StreamRanker.Stream> candidates = toRanker(streams, currentMetaName(fragment));
                         if (candidates.isEmpty()) return;
                         String vid = currentVideoId(fragment);
                         List<StreamRanker.Ranked> ranked =
@@ -227,6 +227,67 @@ public final class StreamAutoPick {
         }
     }
 
+    private static String metaNameOf(Object state) {
+        try {
+            Object meta = call(state, "getMeta");
+            return meta == null ? "" : str(call(meta, "getName"));
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static String currentMetaName(Object fragment) {
+        try {
+            Object viewModel = null;
+            try {
+                viewModel = fragment.getClass().getMethod("getViewModel").invoke(fragment);
+            } catch (Throwable ignored) {
+                Object delegate = field(fragment, "viewModel$delegate");
+                if (delegate != null) {
+                    viewModel = delegate.getClass().getMethod("getValue").invoke(delegate);
+                }
+            }
+            if (viewModel == null) return "";
+            Object flow = viewModel.getClass().getMethod("getState").invoke(viewModel);
+            return metaNameOf(flow.getClass().getMethod("getValue").invoke(flow));
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    /**
+     * Addons sometimes return streams of other titles (a search for a short name). A stream is
+     * eligible only when it shares a significant word with the title; no usable title means no filter.
+     */
+    private static boolean matchesMeta(String streamText, String metaName) {
+        try {
+            String name = metaName == null ? "" : metaName.toLowerCase(java.util.Locale.US);
+            String text = streamText == null ? "" : streamText.toLowerCase(java.util.Locale.US);
+            java.util.Set<String> tokens = new java.util.HashSet<String>();
+            for (String t : text.split("[^a-z0-9]+")) {
+                if (t.length() > 0) tokens.add(t);
+            }
+            String[] words = name.split("[^a-z0-9]+");
+            // A trailing roman numeral or number ("Planet Earth II") must match exactly.
+            if (words.length > 1) {
+                String last = words[words.length - 1];
+                if (last.matches("ii|iii|iv|v|vi|vii|viii|ix|[2-9]") && !tokens.contains(last)) return false;
+            }
+            int significant = 0;
+            for (String word : words) {
+                if (word.length() < 3 || word.equals("the") || word.equals("and") || word.equals("der")
+                        || word.equals("die") || word.equals("das") || word.equals("des")) {
+                    continue;
+                }
+                significant++;
+                if (tokens.contains(word)) return true;
+            }
+            return significant == 0;
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
     private static String currentVideoId(Object fragment) {
         try {
             Object viewModel = null;
@@ -248,7 +309,7 @@ public final class StreamAutoPick {
         }
     }
 
-    private static List<StreamRanker.Stream> toRanker(List<Object> streams) {
+    private static List<StreamRanker.Stream> toRanker(List<Object> streams, String metaName) {
         List<StreamRanker.Stream> out = new ArrayList<StreamRanker.Stream>();
         for (Object s : streams) {
             if (s == null) continue;
@@ -283,6 +344,7 @@ public final class StreamAutoPick {
                 } catch (Throwable ignored) {
                     url = "";
                 }
+                if (!matchesMeta(name + " " + title, metaName)) continue;
                 out.add(new StreamRanker.Stream(name, title, url, ""));
             } catch (Throwable ignored) {
                 // Skip unusable entries.
