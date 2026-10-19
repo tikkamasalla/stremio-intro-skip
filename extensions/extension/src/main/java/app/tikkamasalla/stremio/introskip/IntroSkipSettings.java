@@ -49,48 +49,65 @@ public final class IntroSkipSettings {
         // Attach first: a category only gets its PreferenceManager once it is in the screen.
         target.addPreference(section);
 
-        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_ENABLED, "Skip intros",
-                "Skip intros and recaps during playback", IntroSkipPrefs.isEnabled(context), true));
-        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_ANIME,
+        addSwitch(section, context, IntroSkipPrefs.KEY_ENABLED, "Skip intros",
+                "Skip intros and recaps during playback", IntroSkipPrefs.isEnabled(context));
+        addSwitch(section, context, IntroSkipPrefs.KEY_ANIME,
                 "Skip anime openings (AniSkip)", "Look up anime openings online",
-                IntroSkipPrefs.isAnimeEnabled(context), true));
-        section.addPreference(modeRow(context));
-        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_RECAPS, "Skip recaps",
-                "Skip recap segments too", IntroSkipPrefs.isRecapsEnabled(context), true));
-        section.addPreference(creditsRow(context));
-        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_PREVIEWS, "Skip previews",
-                "Skip preview segments too", IntroSkipPrefs.isPreviewsEnabled(context), false));
-        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_BINGE_EXTERNAL,
+                IntroSkipPrefs.isAnimeEnabled(context));
+        addMode(section, modeRow(context), IntroSkipPrefs.mode(context));
+        addSwitch(section, context, IntroSkipPrefs.KEY_RECAPS, "Skip recaps",
+                "Skip recap segments too", IntroSkipPrefs.isRecapsEnabled(context));
+        addCredits(section, creditsRow(context), IntroSkipPrefs.creditsMode(context));
+        addSwitch(section, context, IntroSkipPrefs.KEY_PREVIEWS, "Skip previews",
+                "Skip preview segments too", IntroSkipPrefs.isPreviewsEnabled(context));
+        addSwitch(section, context, IntroSkipPrefs.KEY_BINGE_EXTERNAL,
                 "Auto-play next episode in external player",
                 "Start the next episode in the same external player when one finishes",
-                IntroSkipPrefs.isBingeExternalEnabled(context), true));
-        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_TRACKMEM,
+                IntroSkipPrefs.isBingeExternalEnabled(context));
+        addSwitch(section, context, IntroSkipPrefs.KEY_TRACKMEM,
                 "Remember tracks per show",
                 "Reuse the last audio and subtitle choice for other episodes",
-                IntroSkipPrefs.isTrackMemEnabled(context), true));
-        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_AUTOPICK,
+                IntroSkipPrefs.isTrackMemEnabled(context));
+        addSwitch(section, context, IntroSkipPrefs.KEY_AUTOPICK,
                 "Auto-pick best stream",
                 "Play the top ranked stream without showing the list",
-                IntroSkipPrefs.isAutoPickEnabled(context), true));
-        section.addPreference(switchRow(context, IntroSkipPrefs.KEY_SHOWLIST,
+                IntroSkipPrefs.isAutoPickEnabled(context));
+        addSwitch(section, context, IntroSkipPrefs.KEY_SHOWLIST,
                 "Always show stream list",
                 "Never auto-pick, always show every stream",
-                IntroSkipPrefs.isShowListEnabled(context), false));
+                IntroSkipPrefs.isShowListEnabled(context));
+    }
+
+    /**
+     * The rows are not persistent (the listener writes the value), so a default value would be
+     * applied to the row on attach and hide the stored one. No default is set, and the stored
+     * value is set again after the row is attached.
+     */
+    private static void addSwitch(PreferenceCategory section, Context context, String key,
+                                  String title, String summary, boolean stored) {
+        SwitchPreference row = switchRow(context, key, title, summary, stored);
+        section.addPreference(row);
+        row.setChecked(stored);
+    }
+
+    private static void addMode(PreferenceCategory section, ListPreference row, String stored) {
+        section.addPreference(row);
+        row.setValue(stored);
+        row.setSummary(modeSummary(stored));
+    }
+
+    private static void addCredits(PreferenceCategory section, ListPreference row, String stored) {
+        section.addPreference(row);
+        row.setValue(stored);
+        row.setSummary(creditsSummary(stored));
     }
 
     private static SwitchPreference switchRow(Context context, final String key,
                                               String title, String summary, boolean checked) {
-        return switchRow(context, key, title, summary, checked, true);
-    }
-
-    private static SwitchPreference switchRow(Context context, final String key,
-                                              String title, String summary, boolean checked,
-                                              boolean defaultValue) {
         final SwitchPreference row = new SwitchPreference(context);
         row.setKey(key);
         row.setTitle(title);
         row.setSummary(summary);
-        row.setDefaultValue(defaultValue);
         row.setPersistent(false);
         row.setChecked(checked);
         row.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
@@ -114,7 +131,6 @@ public final class IntroSkipSettings {
         row.setTitle("Skip mode");
         row.setEntries(new CharSequence[]{"Auto", "Manual"});
         row.setEntryValues(new CharSequence[]{IntroSkipPrefs.MODE_AUTO, IntroSkipPrefs.MODE_MANUAL});
-        row.setDefaultValue(IntroSkipPrefs.MODE_AUTO);
         row.setPersistent(false);
         String value = IntroSkipPrefs.mode(context);
         row.setValue(value);
@@ -149,7 +165,6 @@ public final class IntroSkipSettings {
         row.setEntries(new CharSequence[]{"Auto", "Button", "Off"});
         row.setEntryValues(new CharSequence[]{IntroSkipPrefs.CREDITS_AUTO,
                 IntroSkipPrefs.CREDITS_BUTTON, IntroSkipPrefs.CREDITS_OFF});
-        row.setDefaultValue(IntroSkipPrefs.CREDITS_BUTTON);
         row.setPersistent(false);
         String value = IntroSkipPrefs.creditsMode(context);
         row.setValue(value);

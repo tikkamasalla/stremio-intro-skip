@@ -53,7 +53,6 @@ public final class SpoilerSettings {
         row.setKey(SpoilerHide.KEY);
         row.setTitle("Hide unwatched spoilers");
         row.setSummary("Hide thumbnails and synopses for unwatched episodes");
-        row.setDefaultValue(false);
         row.setPersistent(false);
         row.setChecked(SpoilerHide.isEnabled());
         row.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
@@ -71,5 +70,7 @@ public final class SpoilerSettings {
             }
         });
         section.addPreference(row);
+        // Set again after attach so the stored value is what the switch shows.
+        row.setChecked(SpoilerHide.isEnabled());
     }
 }

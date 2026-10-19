@@ -47,13 +47,25 @@ public final class SdhSettings {
         // Attach first: a category only gets its PreferenceManager once it is in the screen.
         target.addPreference(section);
 
-        section.addPreference(switchRow(context, SdhPrefs.KEY_AVOID, "Avoid SDH/CC subtitles",
+        addSwitch(section, context, SdhPrefs.KEY_AVOID, "Avoid SDH/CC subtitles",
                 "Pick full dialogue subtitles instead of hearing-impaired tracks",
-                SdhPrefs.isAvoidEnabled(context)));
-        section.addPreference(switchRow(context, SdhPrefs.KEY_CLEAN,
+                SdhPrefs.isAvoidEnabled(context));
+        addSwitch(section, context, SdhPrefs.KEY_CLEAN,
                 "Clean SDH text when no other subtitles",
                 "Strip sound notes and speaker labels from the shown cues",
-                SdhPrefs.isCleanEnabled(context)));
+                SdhPrefs.isCleanEnabled(context));
+    }
+
+    /**
+     * The rows are not persistent (the listener writes the value), so a default value would be
+     * applied to the row on attach and hide the stored one. No default is set, and the stored
+     * value is set again after the row is attached.
+     */
+    private static void addSwitch(PreferenceCategory section, Context context, String key,
+                                  String title, String summary, boolean stored) {
+        SwitchPreference row = switchRow(context, key, title, summary, stored);
+        section.addPreference(row);
+        row.setChecked(stored);
     }
 
     private static SwitchPreference switchRow(Context context, final String key,
@@ -62,7 +74,6 @@ public final class SdhSettings {
         row.setKey(key);
         row.setTitle(title);
         row.setSummary(summary);
-        row.setDefaultValue(true);
         row.setPersistent(false);
         row.setChecked(checked);
         row.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
