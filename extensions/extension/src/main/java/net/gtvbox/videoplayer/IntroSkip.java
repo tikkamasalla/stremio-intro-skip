@@ -95,6 +95,8 @@ public final class IntroSkip implements Runnable {
     private static volatile String extSubLabel = "";
     private static volatile String extSubId = "";
     private static volatile int extSubIndex = -1;
+    /** The Intent the hand-off state was read from; any other Intent forces a fresh read. */
+    private static volatile WeakReference<Intent> extSource;
 
     private static final WeakHashMap<PlayerFragment, IntroSkip> ACTIVE = new WeakHashMap<>();
     private static final Map<String, String> MAL_CACHE = new ConcurrentHashMap<>();
@@ -289,6 +291,36 @@ public final class IntroSkip implements Runnable {
      * without extras never reuses a previous one.
      */
     public static void capture(Object fragment, Bundle extras) {
+        clearHandoff();
+        try {
+            Intent source = null;
+            if (fragment instanceof PlayerFragment) {
+                Activity owner = ((PlayerFragment) fragment).getActivity();
+                source = owner == null ? null : owner.getIntent();
+            }
+            extSource = source == null ? null : new WeakReference<Intent>(source);
+            if (extras == null) {
+                return;
+            }
+            readHandoff(extras);
+            if (extSubUrl.length() > 0 && fragment instanceof PlayerFragment) {
+                try {
+                    Activity activity = ((PlayerFragment) fragment).getActivity();
+                    Intent intent = activity == null ? null : activity.getIntent();
+                    if (intent != null && !intent.hasExtra("forcedsrt")) {
+                        intent.putExtra("forcedsrt", extSubUrl);
+                        Log.i(TAG, "handoff: addon subtitles via forcedsrt");
+                    }
+                } catch (Throwable error) {
+                    Log.w(TAG, "forcedsrt", error);
+                }
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "capture", error);
+        }
+    }
+
+    private static void clearHandoff() {
         extHaveMedia = false;
         extMediaType = "";
         extSeason = -1;
@@ -301,10 +333,31 @@ public final class IntroSkip implements Runnable {
         extSubLabel = "";
         extSubId = "";
         extSubIndex = -1;
+        extSource = null;
+    }
+
+    /**
+     * Makes sure the hand-off state belongs to this Intent: a different Intent than the one
+     * captured at launch (a new launch into a live Vimu) is read fresh, and cleared when it
+     * carries no hand-off extras.
+     */
+    private static void syncHandoff(Intent intent) {
+        if (intent == null) return;
+        WeakReference<Intent> ref = extSource;
+        if (ref != null && ref.get() == intent) return;
+        clearHandoff();
+        extSource = new WeakReference<Intent>(intent);
         try {
-            if (extras == null) {
-                return;
-            }
+            Bundle extras = intent.getExtras();
+            if (extras != null) readHandoff(extras);
+            Log.i(TAG, "handoff re-read from a new intent, have media=" + extHaveMedia);
+        } catch (Throwable error) {
+            Log.w(TAG, "syncHandoff", error);
+        }
+    }
+
+    private static void readHandoff(Bundle extras) {
+        try {
             extMediaType = safeLower(extras.getString("media_type"));
             extSeason = extras.getInt("season", -1);
             extEpisode = extras.getInt("episode", -1);
@@ -336,20 +389,8 @@ public final class IntroSkip implements Runnable {
                     + (extSubLang.length() + extSubLabel.length() + extSubId.length() > 0
                     ? " embedded[" + extSubIndex + "] lang=" + extSubLang
                     + " label=" + clip(extSubLabel) + " id=" + clip(extSubId) : ""));
-            if (extSubUrl.length() > 0 && fragment instanceof PlayerFragment) {
-                try {
-                    Activity activity = ((PlayerFragment) fragment).getActivity();
-                    Intent intent = activity == null ? null : activity.getIntent();
-                    if (intent != null && !intent.hasExtra("forcedsrt")) {
-                        intent.putExtra("forcedsrt", extSubUrl);
-                        Log.i(TAG, "handoff: addon subtitles via forcedsrt");
-                    }
-                } catch (Throwable error) {
-                    Log.w(TAG, "forcedsrt", error);
-                }
-            }
         } catch (Throwable error) {
-            Log.w(TAG, "capture", error);
+            Log.w(TAG, "readHandoff", error);
         }
     }
 
@@ -1065,6 +1106,7 @@ public final class IntroSkip implements Runnable {
      */
     private static boolean isEpisodeIntent(Intent intent) {
         if (intent == null) return false;
+        syncHandoff(intent);
         // Stremio's own answer wins over filename parsing: a series stays a series even when
         // the file name carries no episode marker ("Frieren - Beyond Journey's End 02.mkv").
         if (extHaveMedia) {
@@ -1135,6 +1177,7 @@ public final class IntroSkip implements Runnable {
 
     private static ParsedMedia extractMediaFromIntent(Intent intent) {
         if (intent == null) return null;
+        syncHandoff(intent);
         ParsedMedia handed = handedMedia();
         if (handed != null) return handed;
         List<String> candidates = new ArrayList<>();
@@ -2079,6 +2122,12 @@ public final class IntroSkip implements Runnable {
      * Retried while the track list is still loading, then left alone.
      */
     private void applyPendingSub(PlayerFragment f, e p) {
+        try {
+            Activity owner = f.getActivity();
+            if (owner != null) syncHandoff(owner.getIntent());
+        } catch (Throwable ignored) {
+            // Keep the captured state.
+        }
         if (!extHaveSub || subApplied) return;
         if (extSubUrl.length() > 0) {
             if (!subLogged) {
