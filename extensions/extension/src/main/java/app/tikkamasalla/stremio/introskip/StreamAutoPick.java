@@ -30,6 +30,8 @@ public final class StreamAutoPick {
     private static final Map<Object, Boolean> TIMER_8 = Collections.synchronizedMap(
             new WeakHashMap<Object, Boolean>());
     private static volatile String lastPickedVideoId = "";
+    // Episode the user long-pressed: its stream list stays on screen even with auto-pick on.
+    private static volatile String forceListVideoId = "";
 
     private StreamAutoPick() {
     }
@@ -49,6 +51,7 @@ public final class StreamAutoPick {
             if (fragment == null || state == null) return;
             String videoId = str(call(state, "getVideoId"));
             if (videoId.length() == 0) return;
+            if (videoId.equals(forceListVideoId)) return;
             List<Object> streams = list(call(state, "getStreams"));
             if (streams == null || streams.isEmpty()) return;
             String seen = FIRST_SEEN.get(fragment);
@@ -93,6 +96,38 @@ public final class StreamAutoPick {
         }
     }
 
+    /**
+     * Hook at the start of the episode list's selection callback (holder is the leanback
+     * Presenter.ViewHolder, item the VideoModel). Makes the selected tile long-pressable: a long
+     * press opens that episode's stream list instead of auto-picking. Each new selection clears
+     * the previous long-press. Fail soft.
+     */
+    public static void onEpisodeSelected(Object holder, Object item) {
+        try {
+            forceListVideoId = "";
+            if (holder == null || item == null) return;
+            Object tile = field(holder, "view");
+            if (!(tile instanceof android.view.View)) return;
+            Object video = call(item, "getVideo");
+            final String videoId = video == null ? "" : str(call(video, "getId"));
+            if (videoId.length() == 0) return;
+            ((android.view.View) tile).setOnLongClickListener(new android.view.View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(android.view.View view) {
+                    try {
+                        forceListVideoId = videoId;
+                        Log.i(TAG, "long-press: stream list for " + videoId);
+                        return view.performClick();
+                    } catch (Throwable ignored) {
+                        return false;
+                    }
+                }
+            });
+        } catch (Throwable ignored) {
+            // Long-press stays off; a normal press still works.
+        }
+    }
+
     private static void schedule(final Object fragment, final String videoId,
                                  long delayMs, final int timer) {
         try {
@@ -106,6 +141,7 @@ public final class StreamAutoPick {
                         if (!isActive(fragment)) return;
                         if (!IntroSkipPrefs.isAutoPickEnabled(appContext())) return;
                         if (IntroSkipPrefs.isShowListEnabled(appContext())) return;
+                        if (videoId.equals(forceListVideoId)) return;
                         String seen = FIRST_SEEN.get(fragment);
                         if (seen == null || !seen.equals(videoId) || videoId.equals(lastPickedVideoId)) return;
                         List<Object> streams = currentStreams(fragment);
