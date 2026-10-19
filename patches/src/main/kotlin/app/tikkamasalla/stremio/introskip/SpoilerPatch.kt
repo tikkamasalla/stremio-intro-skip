@@ -13,7 +13,7 @@ private const val SPOILER_HIDE = "Lapp/tikkamasalla/stremio/introskip/SpoilerHid
 private const val SPOILER_SETTINGS = "Lapp/tikkamasalla/stremio/introskip/SpoilerSettings;"
 private const val VIDEO_CLASS = "Lcom/stremio/core/types/resource/Video;"
 private const val SPOILER_VERSION = "1.0.0"
-private const val SPOILER_REPO = "https://github.com/tikkamasalla/stremio-intro-skip"
+private const val SPOILER_REPO = "https://github.com/tikkamasalla/stremio-morphe-patches"
 
 /** Hides thumbnails and synopses for unwatched episodes. Default OFF. */
 val hideSpoilersPatch = bytecodePatch(

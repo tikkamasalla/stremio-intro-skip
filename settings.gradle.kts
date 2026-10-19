@@ -1,4 +1,4 @@
-rootProject.name = "stremio-intro-skip"
+rootProject.name = "stremio-morphe-patches"
 
 pluginManagement {
     repositories {

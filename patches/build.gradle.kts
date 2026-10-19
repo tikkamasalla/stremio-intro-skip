@@ -2,12 +2,12 @@ group = "app.tikkamasalla.stremio"
 
 patches {
     about {
-        name = "Stremio Intro Skip"
-        description = "Auto-skips intros and recaps in Stremio for TV shows, movies and anime."
-        source = "https://github.com/tikkamasalla/stremio-intro-skip"
+        name = "Stremio Morphe Patches"
+        description = "Patches for Stremio and Vimu, for use with Morphe."
+        source = "https://github.com/tikkamasalla/stremio-morphe-patches"
         author = "tikkamasalla"
-        contact = "https://github.com/tikkamasalla/stremio-intro-skip/issues"
-        website = "https://github.com/tikkamasalla/stremio-intro-skip"
+        contact = "https://github.com/tikkamasalla/stremio-morphe-patches/issues"
+        website = "https://github.com/tikkamasalla/stremio-morphe-patches"
         license = "GPLv3"
     }
 }

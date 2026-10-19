@@ -1,6 +1,6 @@
-# Stremio Intro Skip
+# Stremio Morphe Patches
 
-Auto-skips intros and recaps in Stremio on Android TV, for TV shows and anime.
+Patches for Stremio and Vimu, for use with Morphe. Made for Android TV: auto-skips intros, recaps and credits, avoids SDH subtitles, picks the best stream, and passes your episode and subtitles to external players.
 
 I made this for my own TV. It just skips the boring bits so playback keeps going.
 
@@ -31,8 +31,8 @@ Tested on Vimu 12.00. If your copy doesn't patch cleanly, open an issue.
 ## Install with Morphe Manager
 
 1. Add this repo as a patch source in Morphe Manager:
-   https://morphe.software/add-source?github=tikkamasalla/stremio-intro-skip
-2. Pick the Stremio app, enable the "Intro Skip" patch, patch and install.
+   https://morphe.software/add-source?github=tikkamasalla/stremio-morphe-patches
+2. Pick the Stremio app (or Vimu), enable the patches you want (for example "Intro Skip"), patch and install.
 3. Optional: the "Enable debug mode" patch option opens a log window when playback starts, useful to see the detected title, season, episode and API responses.
 
 ## Known limits
@@ -61,7 +61,7 @@ Patch your own copy of the Vimu 12.00 APK. Copies that were already modified by 
 The bundle lands in `patches/build/libs/patches-*.mpp`. Apply it with Morphe Desktop.
 
 <!-- PATCHES_START -->
-> **[v1.1.0](https://github.com/tikkamasalla/stremio-intro-skip/releases/tag/v1.1.0)**&nbsp;&nbsp;•&nbsp;&nbsp;`main`&nbsp;&nbsp;•&nbsp;&nbsp;8 patches total
+> **[v1.1.0](https://github.com/tikkamasalla/stremio-morphe-patches/releases/tag/v1.1.0)**&nbsp;&nbsp;•&nbsp;&nbsp;`main`&nbsp;&nbsp;•&nbsp;&nbsp;8 patches total
 <details open>
 <summary>📦 Stremio&nbsp;&nbsp;•&nbsp;&nbsp;4 patches</summary>
 <br>
@@ -70,8 +70,8 @@ The bundle lands in `patches/build/libs/patches-*.mpp`. Apply it with Morphe Des
 |----------|----------------|-----------|
 | [External player progress](#external-player-progress) | Saves watch progress in Stremio when playing in an external player, and starts the player at the saved position. |  |
 | [External player progress manifest](#external-player-progress-manifest) | Declares the keep-alive service for External player progress. Runs with that patch. |  |
-| [Hide spoilers](#hide-spoilers) | Hides thumbnails and synopses for unwatched episodes in Stremio.<br><br>Hide spoilers v1.0.0<br>Repository: https://github.com/tikkamasalla/stremio-intro-skip |  |
-| [Intro Skip](#intro-skip) | Adds intro and recap skip controls for TV shows, movies and anime in Stremio.<br><br>Intro Skip v1.0.0<br>Repository: https://github.com/tikkamasalla/stremio-intro-skip | • Enable debug mode |
+| [Hide spoilers](#hide-spoilers) | Hides thumbnails and synopses for unwatched episodes in Stremio.<br><br>Hide spoilers v1.0.0<br>Repository: https://github.com/tikkamasalla/stremio-morphe-patches |  |
+| [Intro Skip](#intro-skip) | Adds intro and recap skip controls for TV shows, movies and anime in Stremio.<br><br>Intro Skip v1.0.0<br>Repository: https://github.com/tikkamasalla/stremio-morphe-patches | • Enable debug mode |
 
 </details>
 
@@ -87,7 +87,7 @@ The bundle lands in `patches/build/libs/patches-*.mpp`. Apply it with Morphe Des
 | 💊&nbsp;Patch | 📜&nbsp;Description | ⚙️&nbsp;Options |
 |----------|----------------|-----------|
 | [External player result (Vimu)](#external-player-result-vimu) | Returns position and duration from Vimu so Stremio saves progress. Runs with the Intro Skip (Vimu) patch. |  |
-| [Intro Skip (Vimu)](#intro-skip-vimu) | Adds intro and recap skip for TV shows, movies and anime in Vimu.<br><br>Intro Skip v1.0.0<br>Repository: https://github.com/tikkamasalla/stremio-intro-skip |  |
+| [Intro Skip (Vimu)](#intro-skip-vimu) | Adds intro and recap skip for TV shows, movies and anime in Vimu.<br><br>Intro Skip v1.0.0<br>Repository: https://github.com/tikkamasalla/stremio-morphe-patches |  |
 | [Intro Skip native fix (Vimu)](#intro-skip-native-fix-vimu) | Fixes a native crash on rapid seeks in the Vimu media engine. Runs with the Intro Skip (Vimu) patch. |  |
 | [Intro Skip settings row (Vimu)](#intro-skip-settings-row-vimu) | Adds the Intro Skip settings to Vimu Settings. Runs with the Intro Skip (Vimu) patch. |  |
 

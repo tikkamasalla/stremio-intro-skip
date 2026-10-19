@@ -11,7 +11,7 @@ import com.android.tools.smali.dexlib2.Opcode
 private const val EXTENSION_CLASS = "Lapp/tikkamasalla/stremio/subs/SdhAvoid;"
 private const val EXTENSION_SETTINGS = "Lapp/tikkamasalla/stremio/subs/SdhSettings;"
 private const val SDH_VERSION = "1.0.0"
-private const val SDH_REPO = "https://github.com/tikkamasalla/stremio-intro-skip"
+private const val SDH_REPO = "https://github.com/tikkamasalla/stremio-morphe-patches"
 
 /** Prefers full dialogue subtitles over SDH/CC tracks and cleans leftovers. Default ON. */
 val avoidSdhPatch = bytecodePatch(

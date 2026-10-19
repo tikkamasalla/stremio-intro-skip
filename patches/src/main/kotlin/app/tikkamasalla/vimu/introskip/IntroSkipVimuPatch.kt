@@ -14,7 +14,7 @@ import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 private const val INTRO_SKIP = "Lnet/gtvbox/videoplayer/IntroSkip;"
 private const val VIMU_FIX = "Lnet/gtvbox/videoplayer/VimuFix;"
 private const val MOD_VERSION = "1.0.0"
-private const val REPOSITORY_URL = "https://github.com/tikkamasalla/stremio-intro-skip"
+private const val REPOSITORY_URL = "https://github.com/tikkamasalla/stremio-morphe-patches"
 
 /**
  * Adds intro and recap skip for TV shows, movies and anime in Vimu.

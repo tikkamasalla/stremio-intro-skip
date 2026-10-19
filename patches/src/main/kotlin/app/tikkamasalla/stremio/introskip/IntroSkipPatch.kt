@@ -9,7 +9,7 @@ import com.android.tools.smali.dexlib2.Opcode
 private const val EXTENSION_SETTINGS = "Lapp/tikkamasalla/stremio/introskip/IntroSkipSettings;";
 private const val EXTENSION_CLASS = "Lapp/tikkamasalla/stremio/introskip/IntroSkipBridge;"
 private const val MOD_VERSION = "1.0.0"
-private const val REPOSITORY_URL = "https://github.com/tikkamasalla/stremio-intro-skip"
+private const val REPOSITORY_URL = "https://github.com/tikkamasalla/stremio-morphe-patches"
 
 /** Adds the Intro Skip overlay bridge whenever Stremio attaches a Media3 player. */
 val introSkipPatch = bytecodePatch(
