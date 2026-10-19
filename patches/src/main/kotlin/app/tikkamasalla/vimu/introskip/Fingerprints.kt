@@ -45,7 +45,7 @@ object VimuMediaSessionReleaseFingerprint : Fingerprint(
 
 /** Cancels the seek debounce timer before it is replaced in Vimu 12.00. */
 object VimuSeekTimerCancelFingerprint : Fingerprint(
-    definingClass = "Lnet/gtvbox/videoplayer/PlayerFragment;",
+    definingClass = "Lnet/gtvbox/videoplayer/n;",
     name = "f",
     parameters = emptyList(),
 )
