@@ -171,6 +171,7 @@ public final class SdhAvoid {
         private String lastAutoId;
         private String lastSeenId;
         private long firstEvalAt;
+        private String lastState = "";
 
         private final Player.Listener listener = new Player.Listener() {
             @Override
@@ -349,6 +350,7 @@ public final class SdhAvoid {
                 return;
             }
             lastSeenId = selected.id;
+            logState(entries, selected);
             if (switchedAway.contains(selected.id)) return;
             String prefLang = selected.lang;
             List<Entry> pool = new ArrayList<Entry>();
@@ -394,6 +396,24 @@ public final class SdhAvoid {
             }
             if (isAddon(best)) resolveAddon(best, pool);
             else switchTo(best, "label");
+        }
+
+        private void logState(List<Entry> entries, Entry selected) {
+            try {
+                StringBuilder sb = new StringBuilder();
+                for (Entry entry : entries) {
+                    if (sb.length() > 0) sb.append("; ");
+                    sb.append(entry.selected ? "*" : "").append(entry.id).append(" ")
+                            .append(entry.lang).append(" kind=").append(entry.kind)
+                            .append(" '").append(entry.label).append("'");
+                }
+                String line = sb.toString();
+                if (line.equals(lastState)) return;
+                lastState = line;
+                Log.i(TAG, "tracks: " + line);
+            } catch (Throwable ignored) {
+                // Logging only.
+            }
         }
 
         private boolean isAddon(Entry entry) {

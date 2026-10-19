@@ -80,6 +80,7 @@ public final class StreamAutoPick {
             if (best == null) return;
             FIRST_SEEN.put(fragment, videoId + "#picked");
             Log.i(TAG, "pick " + videoId + " -> " + ranked.get(0).stream);
+            logTop(ranked);
             navigate(fragment, best);
         } catch (Throwable ignored) {
             // Full list stays on screen.
@@ -122,6 +123,7 @@ public final class StreamAutoPick {
                         if (best == null) return;
                         FIRST_SEEN.put(fragment, videoId + "#picked");
                         Log.i(TAG, "pick(timer" + timer + ") " + videoId + " -> " + ranked.get(0).stream);
+                        logTop(ranked);
                         navigate(fragment, best);
                     } catch (Throwable ignored) {
                         // Full list stays on screen.
@@ -130,6 +132,17 @@ public final class StreamAutoPick {
             }, delayMs);
         } catch (Throwable ignored) {
             // No timer; later observer calls still pick.
+        }
+    }
+
+    private static void logTop(List<StreamRanker.Ranked> ranked) {
+        try {
+            for (int i = 0; i < ranked.size() && i < 3; i++) {
+                StreamRanker.Ranked r = ranked.get(i);
+                Log.i(TAG, "rank " + (i + 1) + ": " + r.stream + " | " + r.reason);
+            }
+        } catch (Throwable ignored) {
+            // Logging only.
         }
     }
 
