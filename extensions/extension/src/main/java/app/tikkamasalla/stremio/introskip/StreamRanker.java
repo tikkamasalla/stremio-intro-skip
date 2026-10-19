@@ -227,6 +227,16 @@ public final class StreamRanker {
      * Bad sources are excluded unless every stream in the input list is a bad source.
      */
     public static List<Ranked> rank(List<Stream> streams, boolean isMovie) {
+        return rank(streams, isMovie, 0, 0);
+    }
+
+    /**
+     * Same as {@link #rank(List, boolean)} for a requested episode. A stream whose text names an
+     * explicit season or episode that differs from the request (S04E02, 1x05, E1100, " - 1100 ")
+     * is dropped; streams without explicit numbers are kept. Pass season 0 when the season is
+     * unknown (kitsu ids) and episode 0 to disable the check.
+     */
+    public static List<Ranked> rank(List<Stream> streams, boolean isMovie, int reqSeason, int reqEpisode) {
         if (streams == null || streams.isEmpty()) {
             return Collections.emptyList();
         }
@@ -238,9 +248,18 @@ public final class StreamRanker {
             if (s == null) {
                 continue;
             }
+            int kind = EP_UNKNOWN;
+            if (!isMovie && reqEpisode > 0) {
+                kind = episodeKind(s, reqSeason, reqEpisode);
+                if (kind == EP_REJECT) {
+                    continue;
+                }
+            }
             ParsedMeta meta = parse(s);
             long score = computeScore(meta);
             Candidate c = new Candidate(s, meta, score);
+            c.multi = kind == EP_MULTI || kind == EP_PACK;
+            c.oversize = !isMovie && reqEpisode > 0 && meta.sizeBytes > MAX_EPISODE_BYTES;
             allCandidates.add(c);
             if (!meta.badSource) {
                 goodCandidates.add(c);
@@ -271,29 +290,37 @@ public final class StreamRanker {
                 if (a.meta.badSource != b.meta.badSource) {
                     return a.meta.badSource ? 1 : -1;
                 }
-                // 2. Cached before uncached
+                // 2. A single episode over the size cap is a pack or a file the TV cannot play
+                if (a.oversize != b.oversize) {
+                    return a.oversize ? 1 : -1;
+                }
+                // 3. Cached before uncached
                 if (a.meta.cached != b.meta.cached) {
                     return a.meta.cached ? -1 : 1;
                 }
-                // 3. Higher resolution first (AI upscale counts as 2160)
+                // 4. Single-episode files before season packs and multi-episode files
+                if (a.multi != b.multi) {
+                    return a.multi ? 1 : -1;
+                }
+                // 5. Higher resolution first (AI upscale counts as 2160)
                 if (a.meta.resolution != b.meta.resolution) {
                     return Integer.compare(b.meta.resolution, a.meta.resolution);
                 }
-                // 4. HDR / Dolby Vision before SDR
+                // 6. HDR / Dolby Vision before SDR
                 boolean aHdr = a.meta.hdr || a.meta.dolbyVision;
                 boolean bHdr = b.meta.hdr || b.meta.dolbyVision;
                 if (aHdr != bHdr) {
                     return aHdr ? -1 : 1;
                 }
-                // 5. Larger file size (in bytes) first
+                // 7. Larger file size (in bytes) first
                 if (a.meta.sizeBytes != b.meta.sizeBytes) {
                     return Long.compare(b.meta.sizeBytes, a.meta.sizeBytes);
                 }
-                // 6a. Tie-breaker: HEVC/AV1 over H264/other
+                // 8a. Tie-breaker: HEVC/AV1 over H264/other
                 if (a.meta.codecRank != b.meta.codecRank) {
                     return Integer.compare(b.meta.codecRank, a.meta.codecRank);
                 }
-                // 6b. Tie-breaker: More seeders
+                // 8b. Tie-breaker: More seeders
                 if (a.meta.seeders != b.meta.seeders) {
                     return Integer.compare(b.meta.seeders, a.meta.seeders);
                 }
@@ -312,6 +339,200 @@ public final class StreamRanker {
         }
 
         return result;
+    }
+
+    /**
+     * Season and episode requested by a video id: tt0903747:2:1 gives {2, 1}, kitsu:46474:5 gives
+     * {0, 5}. {0, 0} (no check) for movies or ids that do not parse.
+     */
+    public static int[] requestOf(String videoId) {
+        try {
+            if (videoId == null) return new int[] {0, 0};
+            String[] parts = videoId.split(":");
+            if (parts.length < 2) return new int[] {0, 0};
+            int episode = Integer.parseInt(parts[parts.length - 1].trim());
+            int season = 0;
+            if (parts.length >= 3 && parts[0].startsWith("tt")) {
+                season = Integer.parseInt(parts[parts.length - 2].trim());
+            }
+            return new int[] {Math.max(season, 0), Math.max(episode, 0)};
+        } catch (Throwable ignored) {
+            return new int[] {0, 0};
+        }
+    }
+
+    /** Episodes above this size are packs or remuxes the TV cannot play; they rank last. */
+    static final long MAX_EPISODE_BYTES = 25_000_000_000L;
+
+    // Episode kinds returned by episodeKind().
+    static final int EP_REJECT = -1;
+    static final int EP_UNKNOWN = 0;
+    static final int EP_SINGLE = 1;
+    static final int EP_MULTI = 2;
+    static final int EP_PACK = 3;
+
+    private static final String SEP = "[\\s._•·-]{0,3}";
+    // S01E02, S01 . E02, S01E02E03, S01E02-E04, S01E02-04 (ranges need an E or a hyphen).
+    private static final Pattern SXXEYY_PATTERN = Pattern.compile(
+            B_START + "S(\\d{1,2})" + SEP + "EP?(\\d{1,4})(?:(?:\\s*[-~]\\s*EP?|[._]?EP?)(\\d{1,4})(?![A-Za-z0-9]))?",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern NXNN_PATTERN = Pattern.compile(
+            B_START + "(\\d{1,2})x(\\d{2,3})" + B_END,
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern EP_WORD_PATTERN = Pattern.compile(
+            B_START + "(?:(?:ep(?:isode)?)[\\s._-]?(\\d{1,4})|e(\\d{2,4}))" + B_END,
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern ANIME_EP_PATTERN = Pattern.compile(
+            "(?:^|\\s)-\\s(\\d{2,4})(?:v\\d)?(?=\\s|$|\\[|\\()",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern SEASON_RANGE_PATTERN = Pattern.compile(
+            B_START + "(?:seasons?[\\s._-]*|s)(\\d{1,2})(?:\\s*(?:-|~|to|&)\\s*(?:seasons?[\\s._-]*|s)(\\d{1,2})|[-~](\\d{1,2}))" + B_END,
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern SEASON_ONLY_PATTERN = Pattern.compile(
+            B_START + "(?:seasons?[\\s._-]*|s)(\\d{1,2})" + B_END + "(?!" + SEP + "EP?\\d)",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern PACK_WORD_PATTERN = Pattern.compile(
+            B_START + "(?:complete|pack|collection|integrale|all[\\s._-]*seasons|full[\\s._-]*series|\u0441\u0435\u0437\u043E\u043D|\u0441\u0435\u0440\u0438\u0438)" + B_END,
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+
+    /** True when the stream does not name a different season or episode than the requested one. */
+    static boolean episodeMatches(Stream stream, int reqSeason, int reqEpisode) {
+        return episodeKind(stream, reqSeason, reqEpisode) != EP_REJECT;
+    }
+
+    /**
+     * Classifies a stream against the requested episode: EP_REJECT when its text names another
+     * season or episode, EP_SINGLE when it names the requested episode alone, EP_MULTI for a
+     * multi-episode file that contains it, EP_PACK for a season or series pack, EP_UNKNOWN when
+     * it carries no explicit numbers.
+     */
+    static int episodeKind(Stream stream, int reqSeason, int reqEpisode) {
+        try {
+            String name = stream.name != null ? stream.name : "";
+            String title = stream.title != null ? stream.title : "";
+            int kind = kindOfText(name + "\n" + title, reqSeason, reqEpisode);
+            if (kind == EP_SINGLE || kind == EP_MULTI) {
+                // A pack torrent that lists the wanted file on a later line is still a pack.
+                String first = title.split("\\r?\\n", 2)[0];
+                if (kindOfText(first, reqSeason, reqEpisode) == EP_PACK) {
+                    return EP_PACK;
+                }
+            }
+            return kind;
+        } catch (Throwable ignored) {
+            return EP_UNKNOWN;
+        }
+    }
+
+    private static int kindOfText(String text, int reqSeason, int reqEpisode) {
+        try {
+            // Seen as episode refs: {season or -1, from, to}.
+            List<int[]> eps = new ArrayList<int[]>();
+            boolean sawMatch = false;
+            boolean multi = false;
+
+            Matcher m = SXXEYY_PATTERN.matcher(text);
+            StringBuilder rest = new StringBuilder(text);
+            while (m.find()) {
+                int season = Integer.parseInt(m.group(1));
+                int from = Integer.parseInt(m.group(2));
+                int to = m.group(3) != null ? Integer.parseInt(m.group(3)) : from;
+                if (to < from) {
+                    to = from;
+                }
+                eps.add(new int[] {season, from, to});
+                blank(rest, m.start(), m.end());
+            }
+            text = rest.toString();
+            m = NXNN_PATTERN.matcher(text);
+            while (m.find()) {
+                int e = Integer.parseInt(m.group(2));
+                eps.add(new int[] {Integer.parseInt(m.group(1)), e, e});
+                blank(rest, m.start(), m.end());
+            }
+            text = rest.toString();
+            m = EP_WORD_PATTERN.matcher(text);
+            while (m.find()) {
+                String g = m.group(1) != null ? m.group(1) : m.group(2);
+                int e = Integer.parseInt(g);
+                eps.add(new int[] {-1, e, e});
+                blank(rest, m.start(), m.end());
+            }
+            text = rest.toString();
+            m = ANIME_EP_PATTERN.matcher(text);
+            while (m.find()) {
+                int e = Integer.parseInt(m.group(1));
+                // Years and resolutions after a hyphen are not episode numbers.
+                if ((e >= 1900 && e <= 2099) || e == 480 || e == 576 || e == 720 || e == 1080 || e == 2160) {
+                    continue;
+                }
+                eps.add(new int[] {-1, e, e});
+            }
+
+            // Seasons named without an episode: {from, to}, to == from for a single season.
+            List<int[]> seasons = new ArrayList<int[]>();
+            m = SEASON_RANGE_PATTERN.matcher(text);
+            while (m.find()) {
+                int a = Integer.parseInt(m.group(1));
+                int b = Integer.parseInt(m.group(2) != null ? m.group(2) : m.group(3));
+                seasons.add(new int[] {Math.min(a, b), Math.max(a, b)});
+                blank(rest, m.start(), m.end());
+            }
+            text = rest.toString();
+            m = SEASON_ONLY_PATTERN.matcher(text);
+            while (m.find()) {
+                int s = Integer.parseInt(m.group(1));
+                seasons.add(new int[] {s, s});
+            }
+
+            // "Show S02 - 05" style: a lone season plus a bare episode number.
+            if (seasons.size() == 1 && seasons.get(0)[0] == seasons.get(0)[1]) {
+                for (int[] ep : eps) {
+                    if (ep[0] < 0) {
+                        ep[0] = seasons.get(0)[0];
+                    }
+                }
+            }
+
+            for (int[] ep : eps) {
+                boolean seasonOk = ep[0] < 0 || reqSeason <= 0 || ep[0] == reqSeason;
+                if (seasonOk && reqEpisode >= ep[1] && reqEpisode <= ep[2]) {
+                    sawMatch = true;
+                    if (ep[2] > ep[1]) {
+                        multi = true;
+                    } else {
+                        multi = false;
+                        break;
+                    }
+                }
+            }
+            if (sawMatch) {
+                return multi ? EP_MULTI : EP_SINGLE;
+            }
+            if (!eps.isEmpty()) {
+                return EP_REJECT;
+            }
+            if (!seasons.isEmpty()) {
+                for (int[] s : seasons) {
+                    if (reqSeason <= 0 || (reqSeason >= s[0] && reqSeason <= s[1])) {
+                        return EP_PACK;
+                    }
+                }
+                return EP_REJECT;
+            }
+            if (PACK_WORD_PATTERN.matcher(text).find()) {
+                return EP_PACK;
+            }
+            return EP_UNKNOWN;
+        } catch (Throwable ignored) {
+            return EP_UNKNOWN;
+        }
+    }
+
+    private static void blank(StringBuilder sb, int start, int end) {
+        for (int i = start; i < end && i < sb.length(); i++) {
+            sb.setCharAt(i, ' ');
+        }
     }
 
     /**
@@ -537,6 +758,13 @@ public final class StreamRanker {
 
         parts.add(m.sizeDisplay);
 
+        if (current.oversize) {
+            parts.add("over 25 GB");
+        }
+        if (current.multi) {
+            parts.add("pack or multi-episode");
+        }
+
         if (!"unknown".equals(m.codec)) {
             parts.add(m.codec);
         }
@@ -558,6 +786,12 @@ public final class StreamRanker {
         if (isWinner) {
             if (m.cached != other.cached) {
                 return summary + " - wins: cached/instant-play beats uncached";
+            }
+            if (current.oversize != comparison.oversize) {
+                return summary + " - wins: the other stream is over 25 GB";
+            }
+            if (current.multi != comparison.multi) {
+                return summary + " - wins: single-episode file beats a pack";
             }
             if (m.resolution != other.resolution) {
                 if (m.aiUpscale && m.sizeBytes < other.sizeBytes) {
@@ -611,6 +845,8 @@ public final class StreamRanker {
         final Stream stream;
         final ParsedMeta meta;
         final long score;
+        boolean multi;
+        boolean oversize;
 
         Candidate(Stream stream, ParsedMeta meta, long score) {
             this.stream = stream;

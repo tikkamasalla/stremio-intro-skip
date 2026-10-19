@@ -14,6 +14,18 @@ private object StreamsObserverFingerprint : Fingerprint(
     parameters = listOf("Ljava/lang/Object;"),
 )
 
+private object EpisodeSelectedFingerprint : Fingerprint(
+    definingClass = "Lcom/stremio/tv/views/metadetails/videos/VideosListFragment;",
+    name = "onCreate\$lambda\$0",
+    parameters = listOf(
+        "Lcom/stremio/tv/views/metadetails/videos/VideosListFragment;",
+        "Landroidx/leanback/widget/Presenter\$ViewHolder;",
+        "Ljava/lang/Object;",
+        "Landroidx/leanback/widget/RowPresenter\$ViewHolder;",
+        "Ljava/lang/Object;",
+    ),
+)
+
 private object AutoPrefsFingerprint : Fingerprint(
     definingClass = "Lcom/stremio/tv/views/settings/PreferencesFragment;",
     name = "onCreatePreferences",
@@ -37,6 +49,15 @@ val autoPickPatch = bytecodePatch(
             )
         } catch (_: Exception) {
             // Stream list keeps working manually on this build.
+        }
+        try {
+            // Long-press on an episode tile opens its stream list.
+            EpisodeSelectedFingerprint.method.addInstructions(
+                0,
+                "invoke-static {p1, p2}, $AUTOPICK->onEpisodeSelected(Ljava/lang/Object;Ljava/lang/Object;)V",
+            )
+        } catch (_: Exception) {
+            // Long-press stays off; the Always show stream list setting still works.
         }
         try {
             AutoPrefsFingerprint.method.apply {

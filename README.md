@@ -21,7 +21,7 @@ I made this for my own TV. It just skips the boring bits so playback keeps going
 * Skip credits: jumps to the end of the credits so after-credits scenes still play, then shows a Next episode pill. Settings: Skip credits Auto/Button/Off (default Button) and Skip previews on/off (default off). Series only.
 * Binge with external players: when an episode finishes in Vimu, MX Player, VLC or mpv, the next episode starts in the same player. Setting on/off (default on). Series only.
 * Remember tracks per show: reuses the last audio language and subtitle choice for other episodes of the same series. Setting on/off (default on).
-* Auto-pick best stream: plays the top ranked stream without showing the list. Cached first, then resolution, then HDR, then size. Setting on/off (default on) plus Always show stream list (default off).
+* Auto-pick best stream: plays the top ranked stream without showing the list. Cached first, then resolution, then HDR, then size. Setting on/off (default on) plus Always show stream list (default off). Long-press an episode to open its stream list once. Streams that name another season or episode, season packs and files over 25 GB are skipped or ranked last.
 * Spoiler titles: when Hide spoilers is ON, unwatched episode titles show as Episode N in the row and header.
 * Vimu: intro skip with Skip button and Auto/Manual settings, crash fixes, and progress result.
 

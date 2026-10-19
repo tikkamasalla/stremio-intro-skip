@@ -399,6 +399,8 @@ public final class ExternalProgress {
      */
     private static volatile long lastDuration;
     private static volatile long launchedAt;
+    private static final long MIN_OPEN_MS = 60000L;
+    private static final double FULL_RATIO = 0.9;
     private static final String KEY_ARMED_AT = "external_binge_armed_at";
     private static final long BINGE_TTL_MS = 60000L;
 
@@ -416,19 +418,20 @@ public final class ExternalProgress {
             String endBy = extras != null ? extras.getString("end_by") : null;
             long openMs = launchedAt > 0L ? System.currentTimeMillis() - launchedAt : 0L;
             launchedAt = 0L;
-            boolean userQuit = "user".equals(endBy);
-            boolean completed = "playback_completion".equals(endBy);
-            if ("net.gtvbox.videoplayer.result".equals(action)) {
-                completed |= resultCode == 1;
-            } else if ("org.videolan.vlc.player.result".equals(action)) {
-                // A zero duration right after launch is a failed load or Back, not an ending.
-                completed |= duration == 0L && openMs > 10000L;
-            } else if ("is.xyz.mpv.MPVActivity.result".equals(action)) {
-                completed |= resultCode == Activity_RESULT_OK && position == 0L && duration == 0L
-                        && openMs > 10000L;
-            }
-            if (!completed && duration > 0L && position >= (long) (duration * 0.95)
-                    && (!userQuit || openMs > 15000L)) {
+            // Real completion only: the player reported the end with a known duration, or it was
+            // open for a minute and reached 90% of the duration. A quick error return is never one.
+            boolean reportedEnd = "playback_completion".equals(endBy)
+                    || ("net.gtvbox.videoplayer.result".equals(action) && resultCode == 1);
+            boolean completed = false;
+            if (reportedEnd) {
+                completed = duration > 0L || (openMs >= MIN_OPEN_MS && lastDuration > 0L);
+            } else if (duration > 0L && position >= (long) (duration * FULL_RATIO)) {
+                completed = openMs >= MIN_OPEN_MS;
+            } else if (duration == 0L && openMs >= MIN_OPEN_MS && lastDuration > 0L
+                    && ("org.videolan.vlc.player.result".equals(action)
+                    || ("is.xyz.mpv.MPVActivity.result".equals(action)
+                    && resultCode == Activity_RESULT_OK && position == 0L))) {
+                // VLC and mpv report no position at the end of a file.
                 completed = true;
             }
             if (completed) {
@@ -439,15 +442,75 @@ public final class ExternalProgress {
             Log.i(TAG, "result code=" + resultCode + " action=" + action + " position=" + position
                     + " duration=" + duration + " end_by=" + endBy + " completed=" + completed);
             if (completed) armBinge();
-            if (position <= 0L && duration <= 0L && !completed) {
-                return null;
-            }
             Constructor<?> constructor = Class.forName(RESULT_CLASS)
                     .getConstructor(long.class, long.class, boolean.class);
             return constructor.newInstance(Math.max(position, 0L), Math.max(duration, 0L), completed);
         } catch (Throwable error) {
             Log.w(TAG, "parse", error);
             return null;
+        }
+    }
+
+    /**
+     * Hook at the start of PlayerFragment.onExternalPlayerResult, before Stremio marks the episode
+     * watched and opens the next one. For a completed result it first saves the full position in
+     * the core, which creates or updates the library item (the stock completed branch never sends a
+     * position, and marking watched is ignored for an episode without one), then marks the episode
+     * watched. The mark is repeated after a short delay, because the core applies the progress
+     * asynchronously, and only while the player still holds the same episode. Fails soft.
+     */
+    public static void onExternalResult(Object fragment, Object result) {
+        try {
+            if (fragment == null || result == null) {
+                return;
+            }
+            if (!Boolean.TRUE.equals(invoke(result, "getCompleted"))) {
+                return;
+            }
+            final Object vm = invoke(fragment, "getViewModel");
+            if (vm == null) {
+                return;
+            }
+            long duration = ((Number) invoke(result, "getDuration")).longValue();
+            if (duration > 0L) {
+                ClassLoader loader = vm.getClass().getClassLoader();
+                Class<?> updateClass = Class.forName(
+                        "com.stremio.common.viewmodels.state.VideoPlaybackState$UpdateProgress",
+                        false, loader);
+                Object update = updateClass.getConstructor(long.class, long.class)
+                        .newInstance(duration, duration);
+                invoke(vm, "onStateChange", update);
+            }
+            final String videoId = currentVideoId(vm);
+            invoke(vm, "markAsWatched");
+            Log.i(TAG, "completed: progress saved and marked watched " + videoId);
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        if (videoId.length() > 0 && videoId.equals(currentVideoId(vm))) {
+                            invoke(vm, "markAsWatched");
+                            Log.i(TAG, "completed: marked watched again " + videoId);
+                        }
+                    } catch (Throwable error) {
+                        Log.w(TAG, "mark watched again", error);
+                    }
+                }
+            }, 1500L);
+        } catch (Throwable error) {
+            Log.w(TAG, "onExternalResult", error);
+        }
+    }
+
+    /** Id of the episode the player view model holds right now, or "". */
+    private static String currentVideoId(Object vm) {
+        try {
+            Object flow = invoke(vm, "getState");
+            Object state = flow == null ? null : invoke(flow, "getValue");
+            Object video = state == null ? null : invoke(state, "getCurrentVideo");
+            return video == null ? "" : string(invoke(video, "getId"));
+        } catch (Throwable ignored) {
+            return "";
         }
     }
 
@@ -539,6 +602,7 @@ public final class ExternalProgress {
      */
     public static void maybeBinge(Object fragment, Object stream) {
         try {
+            playbackStartedAt = System.currentTimeMillis();
             Context context = appContext;
             if (context == null || fragment == null) return;
             android.content.SharedPreferences prefs =
@@ -564,6 +628,39 @@ public final class ExternalProgress {
             }
         } catch (Throwable ignored) {
             // Internal playback continues.
+        }
+    }
+
+    private static volatile long playbackStartedAt;
+
+    /**
+     * Hook at the start of the lambda the internal player calls when playback ends (it opens the
+     * next episode). Lets it through only for a real end: the player was open for a minute and sat
+     * at 90% of the duration or later. A failed file that ends at once, as when the stream does not
+     * play and Stremio falls back to VLC, would otherwise chain into the next episodes. The next
+     * episode pill does not pass through here. Fails open.
+     */
+    public static boolean allowAutoNext(Object lambda) {
+        try {
+            if (lambda == null) return true;
+            Object fragment = field(lambda, "this$0");
+            Object playerObject = fragment == null ? null : field(fragment, "player");
+            if (!(playerObject instanceof Player)) return true;
+            Player player = (Player) playerObject;
+            long position = player.getCurrentPosition();
+            long duration = player.getDuration();
+            long startedAt = playbackStartedAt;
+            long openMs = startedAt > 0L ? System.currentTimeMillis() - startedAt : MIN_OPEN_MS;
+            boolean real = duration > 0L && position >= (long) (duration * FULL_RATIO)
+                    && openMs >= MIN_OPEN_MS;
+            if (!real) {
+                Log.i(TAG, "auto-next blocked: position=" + position + " duration=" + duration
+                        + " open=" + openMs + "ms");
+            }
+            return real;
+        } catch (Throwable error) {
+            Log.w(TAG, "allowAutoNext", error);
+            return true;
         }
     }
 
