@@ -29,6 +29,7 @@ public final class StreamAutoPick {
             new WeakHashMap<Object, Boolean>());
     private static final Map<Object, Boolean> TIMER_8 = Collections.synchronizedMap(
             new WeakHashMap<Object, Boolean>());
+    private static volatile String lastPickedVideoId = "";
 
     private StreamAutoPick() {
     }
@@ -47,12 +48,15 @@ public final class StreamAutoPick {
             Object state = field(lambda, "L$0");
             if (fragment == null || state == null) return;
             String videoId = str(call(state, "getVideoId"));
+            if (videoId.length() == 0) return;
             List<Object> streams = list(call(state, "getStreams"));
             if (streams == null || streams.isEmpty()) return;
             String seen = FIRST_SEEN.get(fragment);
+            if ((videoId + "#picked").equals(seen) || videoId.equals(lastPickedVideoId)) return;
             long now = System.currentTimeMillis();
             Long firstAt = FIRST_AT.get(fragment);
             if (seen == null || !seen.equals(videoId)) {
+                lastPickedVideoId = "";
                 FIRST_SEEN.put(fragment, videoId);
                 FIRST_AT.put(fragment, now);
                 TIMER_4.put(fragment, false);
@@ -79,6 +83,7 @@ public final class StreamAutoPick {
             Object best = streamFor(streams, ranked.get(0).stream);
             if (best == null) return;
             FIRST_SEEN.put(fragment, videoId + "#picked");
+            lastPickedVideoId = videoId;
             Log.i(TAG, "pick " + videoId + " -> " + ranked.get(0).stream);
             logTop(ranked);
             navigate(fragment, best);
@@ -97,10 +102,11 @@ public final class StreamAutoPick {
                 @Override
                 public void run() {
                     try {
+                        if (!isActive(fragment)) return;
                         if (!IntroSkipPrefs.isAutoPickEnabled(appContext())) return;
                         if (IntroSkipPrefs.isShowListEnabled(appContext())) return;
                         String seen = FIRST_SEEN.get(fragment);
-                        if (seen == null || !seen.equals(videoId)) return;
+                        if (seen == null || !seen.equals(videoId) || videoId.equals(lastPickedVideoId)) return;
                         List<Object> streams = currentStreams(fragment);
                         if (streams == null || streams.isEmpty()) return;
                         List<StreamRanker.Stream> candidates = toRanker(streams, currentMetaName(fragment));
@@ -122,6 +128,7 @@ public final class StreamAutoPick {
                         Object best = streamFor(streams, ranked.get(0).stream);
                         if (best == null) return;
                         FIRST_SEEN.put(fragment, videoId + "#picked");
+                        lastPickedVideoId = videoId;
                         Log.i(TAG, "pick(timer" + timer + ") " + videoId + " -> " + ranked.get(0).stream);
                         logTop(ranked);
                         navigate(fragment, best);
@@ -316,7 +323,7 @@ public final class StreamAutoPick {
             if (!isPlayable(s)) continue;
             try {
                 String name = str(call(s, "getName"));
-                String title = str(call(s, "getDescription"));
+                String title = descriptionOf(s);
                 String url = "";
                 try {
                     Object u = call(s, "getUrl");
@@ -362,12 +369,28 @@ public final class StreamAutoPick {
         }
     }
 
+    private static boolean isActive(Object fragment) {
+        try {
+            return fragment != null
+                    && Boolean.TRUE.equals(call(fragment, "isAdded"))
+                    && Boolean.TRUE.equals(call(fragment, "isResumed"));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static String descriptionOf(Object stream) {
+        String desc = str(call(stream, "getDescription"));
+        if (desc.length() == 0) desc = str(call(stream, "getTitle"));
+        return desc;
+    }
+
     private static Object streamFor(List<Object> streams, StreamRanker.Stream best) {
         if (best == null) return null;
         for (Object s : streams) {
             try {
                 String name = str(call(s, "getName"));
-                String title = str(call(s, "getDescription"));
+                String title = descriptionOf(s);
                 if (name.equals(best.name) && title.equals(best.title)) return s;
             } catch (Throwable ignored) {
                 // Continue.

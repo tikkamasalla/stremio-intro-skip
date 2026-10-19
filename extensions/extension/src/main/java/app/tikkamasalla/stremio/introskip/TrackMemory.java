@@ -13,7 +13,11 @@ import androidx.media3.common.Tracks;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.ref.WeakReference;
+import java.util.Collections;
 import java.util.Locale;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 /**
  * Remembers the audio language and subtitle choice per series and applies them
@@ -23,6 +27,12 @@ public final class TrackMemory {
     private static final String TAG = "TrackMemory";
     private static final String FILE = "introskip_prefs";
     private static final String KEY_ENABLED = "trackmem_enabled";
+    /** Playbacks where the user picked a track (or we already applied one): never override again. */
+    private static final Map<Object, Boolean> MANUAL = Collections.synchronizedMap(
+            new WeakHashMap<Object, Boolean>());
+    /** Last player seen per view model, to forget manual picks of an earlier playback. */
+    private static final Map<Object, WeakReference<Object>> LAST_PLAYER = Collections.synchronizedMap(
+            new WeakHashMap<Object, WeakReference<Object>>());
 
     private TrackMemory() {
     }
@@ -94,7 +104,7 @@ public final class TrackMemory {
         }
     }
 
-    private static Object viewModelOf(Object holder, String fieldName) {
+    private static Object fieldOf(Object holder, String fieldName) {
         try {
             Field field = null;
             for (Class<?> c = holder.getClass(); c != null; c = c.getSuperclass()) {
@@ -113,6 +123,31 @@ public final class TrackMemory {
         }
     }
 
+    /** Finds a raw field, a public getter or a Kotlin lazy delegate (name$delegate). */
+    private static Object viewModelOf(Object holder, String fieldName) {
+        try {
+            if (holder == null) return null;
+            Object direct = fieldOf(holder, fieldName);
+            if (direct != null) return direct;
+            String getterName = "get" + Character.toUpperCase(fieldName.charAt(0)) + fieldName.substring(1);
+            try {
+                Object value = holder.getClass().getMethod(getterName).invoke(holder);
+                if (value != null) return value;
+            } catch (Throwable ignored) {
+                // Try the delegate.
+            }
+            Object delegate = fieldOf(holder, fieldName + "$delegate");
+            if (delegate != null) {
+                Method getValue = delegate.getClass().getMethod("getValue");
+                getValue.setAccessible(true);
+                return getValue.invoke(delegate);
+            }
+            return null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     private static String formatString(Object format, String fieldName) {
         try {
             Field field = format.getClass().getField(fieldName);
@@ -126,9 +161,11 @@ public final class TrackMemory {
     /** Hook at the start of TrackSelectionDialog.onSelectTrack. */
     public static void remember(Object dialog, Object trackInfo) {
         try {
-            if (dialog == null || trackInfo == null) return;
-            if (!enabled()) return;
+            if (dialog == null) return;
             Object viewModel = viewModelOf(dialog, "viewModel");
+            // Any manual pick, including "Subtitles off" (no track info), stops automatic changes.
+            if (viewModel != null) MANUAL.put(viewModel, Boolean.TRUE);
+            if (trackInfo == null || !enabled()) return;
             if (viewModel == null) return;
             String seriesId = seriesIdOf(viewModel);
             if (seriesId.length() == 0 || !seriesId.startsWith("tt")) return;
@@ -171,6 +208,13 @@ public final class TrackMemory {
             Object viewModel = viewModelOf(listener, "viewModel");
             Object player = viewModelOf(listener, "player");
             if (viewModel == null || player == null) return;
+            WeakReference<Object> last = LAST_PLAYER.get(viewModel);
+            if (last == null || last.get() != player) {
+                LAST_PLAYER.put(viewModel, new WeakReference<Object>(player));
+                MANUAL.remove(viewModel);
+            }
+            if (Boolean.TRUE.equals(MANUAL.get(viewModel))
+                    || Boolean.TRUE.equals(MANUAL.get(player))) return;
             String seriesId = seriesIdOf(viewModel);
             if (seriesId.length() == 0 || !seriesId.startsWith("tt")) return;
             Context context = app();
@@ -193,7 +237,8 @@ public final class TrackMemory {
             }
             TrackSelectionParameters params =
                     (TrackSelectionParameters) getParams.invoke(player);
-            if (params == null || !params.overrides.isEmpty()) return;
+            if (params == null || !params.overrides.isEmpty()
+                    || !params.disabledTrackTypes.isEmpty()) return;
             TrackSelectionParameters.Builder builder = params.buildUpon();
             boolean changed = false;
             if (audioLang != null && audioLang.length() > 0) {
@@ -212,6 +257,8 @@ public final class TrackMemory {
             }
             if (!changed) return;
             setParams.invoke(player, builder.build());
+            MANUAL.put(viewModel, Boolean.TRUE);
+            MANUAL.put(player, Boolean.TRUE);
             Log.i(TAG, "applied " + seriesId + " audio=" + audioLang + " sub=" + subLang);
         } catch (Throwable ignored) {
             // Fall back to Stremio defaults.
