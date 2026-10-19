@@ -1031,6 +1031,7 @@ public final class IntroSkipBridge {
                     log("Next episode failed: no fragment");
                     return;
                 }
+                reportProgress(frag);
                 try {
                     java.lang.reflect.Method direct = frag.getClass().getDeclaredMethod("navigateToNextVideo");
                     direct.setAccessible(true);
@@ -1061,7 +1062,7 @@ public final class IntroSkipBridge {
                     return;
                 }
                 try {
-                    Object vm = frag.getClass().getMethod("getViewModel").invoke(frag);
+                    Object vm = viewModelOf(frag);
                     Object flow = vm.getClass().getMethod("getState").invoke(vm);
                     Object st = flow.getClass().getMethod("getValue").invoke(flow);
                     try {
@@ -1081,6 +1082,66 @@ public final class IntroSkipBridge {
             }
         }
 
+        /**
+         * Tells the core how far the finished episode got before navigating away, so its
+         * progress is saved (the player screen is replaced without a normal end event).
+         */
+        private void reportProgress(Object frag) {
+            try {
+                if (player == null) return;
+                long position = player.getCurrentPosition();
+                long duration = player.getDuration();
+                if (position < 0 || duration <= 0) return;
+                Object vm = viewModelOf(frag);
+                if (vm == null) return;
+                Class<?> stateClass = Class.forName(
+                        "com.stremio.common.viewmodels.state.VideoPlaybackState",
+                        false, vm.getClass().getClassLoader());
+                Class<?> updateClass = Class.forName(
+                        "com.stremio.common.viewmodels.state.VideoPlaybackState$UpdateProgress",
+                        false, vm.getClass().getClassLoader());
+                Object update = updateClass.getConstructor(long.class, long.class)
+                        .newInstance(position, duration);
+                java.lang.reflect.Method onStateChange = vm.getClass().getMethod("onStateChange", stateClass);
+                onStateChange.invoke(vm, update);
+                log("Next episode: progress reported " + position + "/" + duration + " ms");
+            } catch (Throwable error) {
+                log("Next episode: progress not reported: " + error);
+            }
+        }
+
+        /** The player fragment's view model: a private Kotlin getter, so also try the lazy delegate. */
+        private Object viewModelOf(Object frag) {
+            try {
+                for (Class<?> c = frag.getClass(); c != null; c = c.getSuperclass()) {
+                    try {
+                        java.lang.reflect.Method getter = c.getDeclaredMethod("getViewModel");
+                        getter.setAccessible(true);
+                        Object vm = getter.invoke(frag);
+                        if (vm != null) return vm;
+                    } catch (NoSuchMethodException ignored) {
+                        // Try the superclass.
+                    }
+                    try {
+                        java.lang.reflect.Field delegate = c.getDeclaredField("viewModel$delegate");
+                        delegate.setAccessible(true);
+                        Object lazy = delegate.get(frag);
+                        if (lazy != null) {
+                            java.lang.reflect.Method getValue = lazy.getClass().getMethod("getValue");
+                            getValue.setAccessible(true);
+                            Object vm = getValue.invoke(lazy);
+                            if (vm != null) return vm;
+                        }
+                    } catch (NoSuchFieldException ignored) {
+                        // Try the superclass.
+                    }
+                }
+            } catch (Throwable ignored) {
+                // No view model.
+            }
+            return null;
+        }
+
         private Object resolveFragment() {
             try {
                 if (fragment != null && !(fragment instanceof Session)) return fragment;
@@ -1095,7 +1156,7 @@ public final class IntroSkipBridge {
 
         private Object nextVideoOf(Object frag) {
             try {
-                Object vm = frag.getClass().getMethod("getViewModel").invoke(frag);
+                Object vm = viewModelOf(frag);
                 Object flow = vm.getClass().getMethod("getState").invoke(vm);
                 Object st = flow.getClass().getMethod("getValue").invoke(flow);
                 try {
