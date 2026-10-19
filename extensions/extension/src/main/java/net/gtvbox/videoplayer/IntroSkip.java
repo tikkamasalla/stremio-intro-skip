@@ -81,6 +81,8 @@ public final class IntroSkip implements Runnable {
     private static final String ANISKIP_URL = "https://api.aniskip.com/v2/skip-times/";
     private static final String INTRODB_URL = "https://api.theintrodb.org/v4/media";
     private static final String INTRODB_APP_URL = "https://api.introdb.app/segments";
+    private static final String CINEMETA_META_SERIES_URL = "https://v3-cinemeta.strem.io/meta/series/";
+    private static final Map<String, String> CINEMETA_IDS_CACHE = new ConcurrentHashMap<String, String>();
     private static final String CINEMETA_SERIES_URL = "https://v3-cinemeta.strem.io/catalog/series/top/search=";
     private static final Pattern IMDB_ID = Pattern.compile("(?i)(tt\\d{7,})");
     private static final Pattern YEAR = Pattern.compile("\\b(19\\d{2}|20\\d{2})\\b");
@@ -1704,8 +1706,10 @@ public final class IntroSkip implements Runnable {
     /**
      * Keyless IntroDB lookup: an IMDb id from the playing intent when one is present,
      * else a Cinemeta title search (exact normalized match, remembered for 60 days),
-     * then TheIntroDB by imdb_id + season/episode, then IntroDB.app but only for
-     * segment types TheIntroDB has nothing for. No API keys are used.
+     * then TheIntroDB by imdb_id + season/episode (duration_ms sent when known),
+     * retrying a miss by tvdb_id and then tmdb_id (ids from a keyless Cinemeta meta
+     * lookup, cached per show), then IntroDB.app but only for segment types
+     * TheIntroDB has nothing for. No API keys are used.
      */
     private static List<Seg> fetchIntroDb(Context ctx, ParsedMedia info, int durationMs) {
         List<Seg> out = new ArrayList<Seg>();
@@ -1719,9 +1723,14 @@ public final class IntroSkip implements Runnable {
                 return out;
             }
             Log.i(TAG, "IntroDB: looking up imdb=" + id + " S" + info.season + "E" + info.episode);
-            JSONObject body = new JSONObject(http("GET", INTRODB_URL + "?imdb_id=" + id
-                    + "&season=" + info.season + "&episode=" + info.episode + "&duration_ms=" + durationMs,
-                    null, null));
+            String tvdbId = "";
+            String tmdbId = "";
+            if (isImdbId(id)) {
+                String[] ids = cinemetaIds(ctx, id);
+                tvdbId = ids[0];
+                tmdbId = ids[1];
+            }
+            JSONObject body = theIntroDbQuery(id, tvdbId, tmdbId, info.season, info.episode, durationMs);
             // Process "intro" before "recap" so a recap can never suppress an overlapping intro.
             String[] kinds = {"intro", "recap", "credits"};
             for (int k = 0; k < kinds.length; k++) {
@@ -1773,6 +1782,133 @@ public final class IntroSkip implements Runnable {
             if (s.name.equals(name)) return true;
         }
         return false;
+    }
+
+    /**
+     * TheIntroDB with multi-identity fallback: imdb_id first, then tvdb_id, then
+     * tmdb_id. A query counts as a miss when it answers 204/404, carries an error,
+     * or holds no segment of any kind; duration_ms is sent whenever it is known.
+     */
+    private static JSONObject theIntroDbQuery(String imdbId, String tvdbId, String tmdbId,
+                                              int season, int episode, int durationMs) throws Exception {
+        StringBuilder suffix = new StringBuilder();
+        if (season > 0 && episode > 0) {
+            suffix.append("&season=").append(season).append("&episode=").append(episode);
+        }
+        if (durationMs > 0) suffix.append("&duration_ms=").append(durationMs);
+        String[][] identities = new String[][]{
+            {"imdb_id", safe(imdbId)}, {"tvdb_id", safe(tvdbId)}, {"tmdb_id", safe(tmdbId)}};
+        JSONObject last = null;
+        for (int i = 0; i < identities.length; i++) {
+            String name = identities[i][0];
+            String value = identities[i][1];
+            if (value.length() == 0) continue;
+            Log.i(TAG, "IntroDB: lookup by " + name + " = " + value);
+            JSONObject response = new JSONObject(http("GET", INTRODB_URL + "?" + name + "=" + value + suffix,
+                    null, null));
+            if (hasAnySegment(response)) return response;
+            Log.i(TAG, "IntroDB: no segments for " + name + " = " + value + ", trying next identity");
+            last = response;
+        }
+        return last == null ? new JSONObject() : last;
+    }
+
+    private static boolean hasAnySegment(JSONObject response) {
+        if (response == null) return false;
+        if (response.has("error")) return false;
+        String[] kinds = {"intro", "recap", "credits", "preview"};
+        for (int i = 0; i < kinds.length; i++) {
+            JSONArray items = response.optJSONArray(kinds[i]);
+            if (items != null && items.length() > 0) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Keyless tvdb/tmdb ids for the multi-identity IntroDB lookup: the Cinemeta
+     * meta document for the show carries tvdb_id and moviedb_id (the TMDB id).
+     * Cached in memory and in SharedPreferences for 60 days, like the title cache.
+     */
+    private static String[] cinemetaIds(Context ctx, String imdbId) {
+        String[] empty = new String[]{"", ""};
+        String wanted = safe(imdbId).trim();
+        if (wanted.length() == 0) return empty;
+        String tvdbKey = "ids-tvdb:" + wanted;
+        String tmdbKey = "ids-tmdb:" + wanted;
+        String[] cached = cachedIds(ctx, tvdbKey, tmdbKey, wanted);
+        if (cached != null) return cached;
+        // One request per show: the lookup runs once per media, but stay safe.
+        synchronized (CINEMETA_LOCK) {
+            cached = cachedIds(ctx, tvdbKey, tmdbKey, wanted);
+            if (cached != null) return cached;
+            return cinemetaIdsRequest(ctx, tvdbKey, tmdbKey, wanted);
+        }
+    }
+
+    /** Session cache (hits and misses), then the stored 60-day hit cache; null = not cached. */
+    private static String[] cachedIds(Context ctx, String tvdbKey, String tmdbKey, String wanted) {
+        String tvdb = CINEMETA_IDS_CACHE.get(tvdbKey);
+        String tmdb = CINEMETA_IDS_CACHE.get(tmdbKey);
+        if (tvdb != null && tmdb != null) {
+            Log.i(TAG, "Cinemeta: ids cache hit for \"" + wanted + "\" -> tvdb="
+                    + (tvdb.length() > 0 ? tvdb : "<none>") + " tmdb=" + (tmdb.length() > 0 ? tmdb : "<none>"));
+            return new String[]{tvdb, tmdb};
+        }
+        String storedTvdb = VimuIntroSkipPrefs.cachedImdb(ctx, tvdbKey);
+        String storedTmdb = VimuIntroSkipPrefs.cachedImdb(ctx, tmdbKey);
+        if (storedTvdb.length() > 0 || storedTmdb.length() > 0) {
+            CINEMETA_IDS_CACHE.put(tvdbKey, storedTvdb);
+            CINEMETA_IDS_CACHE.put(tmdbKey, storedTmdb);
+            Log.i(TAG, "Cinemeta: ids cache hit (stored) for \"" + wanted + "\" -> tvdb="
+                    + (storedTvdb.length() > 0 ? storedTvdb : "<none>")
+                    + " tmdb=" + (storedTmdb.length() > 0 ? storedTmdb : "<none>"));
+            return new String[]{storedTvdb, storedTmdb};
+        }
+        return null;
+    }
+
+    private static String[] cinemetaIdsRequest(Context ctx, String tvdbKey, String tmdbKey, String wanted) {
+        String[] empty = new String[]{"", ""};
+        try {
+            JSONObject response = new JSONObject(http("GET", CINEMETA_META_SERIES_URL + wanted + ".json",
+                    null, null));
+            JSONObject meta = response.optJSONObject("meta");
+            if (meta == null) {
+                Log.i(TAG, "Cinemeta: no meta for \"" + wanted + "\"");
+                CINEMETA_IDS_CACHE.put(tvdbKey, "");
+                CINEMETA_IDS_CACHE.put(tmdbKey, "");
+                return empty;
+            }
+            String tvdb = idText(meta, "tvdb_id");
+            String tmdb = idText(meta, "moviedb_id");
+            if (tmdb.length() == 0) tmdb = idText(meta, "tmdb_id");
+            Log.i(TAG, "Cinemeta: ids for \"" + wanted + "\" -> tvdb="
+                    + (tvdb.length() > 0 ? tvdb : "<none>")
+                    + " tmdb=" + (tmdb.length() > 0 ? tmdb : "<none>"));
+            CINEMETA_IDS_CACHE.put(tvdbKey, tvdb);
+            CINEMETA_IDS_CACHE.put(tmdbKey, tmdb);
+            if (tvdb.length() > 0) VimuIntroSkipPrefs.cacheImdb(ctx, tvdbKey, tvdb);
+            if (tmdb.length() > 0) VimuIntroSkipPrefs.cacheImdb(ctx, tmdbKey, tmdb);
+            return new String[]{tvdb, tmdb};
+        } catch (Throwable error) {
+            Log.w(TAG, "Cinemeta ids lookup failed: " + error);
+            return empty;
+        }
+    }
+
+    private static String idText(JSONObject meta, String key) {
+        try {
+            if (meta.isNull(key)) return "";
+            Object value = meta.opt(key);
+            if (value instanceof Number) {
+                long number = ((Number) value).longValue();
+                return number > 0 ? String.valueOf(number) : "";
+            }
+            String text = safe(String.valueOf(value)).trim();
+            return text.matches("\\d+") ? text : "";
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     /**
