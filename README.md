@@ -15,6 +15,7 @@ I made this for my own TV. It just skips the boring bits so playback keeps going
 * Remote keys are never blocked. OK on the button skips, everything else works as normal.
 * Settings in Stremio: on/off, anime on/off, Auto or Manual, recaps on/off.
 * Hide spoilers: optional switch in Settings Interface that hides thumbnails and synopses for unwatched episodes.
+* External player progress: watch progress is saved when you play in an external player (Vimu, MX Player, VLC, mpv), and the player starts at the saved position.
 
 Tested on Stremio 1.6.12 (com.stremio.one, Android TV).
 
