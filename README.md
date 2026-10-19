@@ -71,6 +71,8 @@ The bundle lands in `patches/build/libs/patches-*.mpp`. Apply it with Morphe Des
 
 Started from aniskip-stremio by AzukiSensei (https://github.com/AzukiSensei/aniskip-stremio), GPLv3. Rewritten with chapter-based skipping, IntroDB support and new skip logic.
 
+SDH annotation rules adapted from liongalahad-nuviotv-morphe-patches (GPLv3).
+
 ## License
 
 GPLv3, see [LICENSE](LICENSE).
