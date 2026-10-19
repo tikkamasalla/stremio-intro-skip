@@ -49,7 +49,11 @@ public final class SdhAvoid {
     private static final Map<String, Boolean> URL_VERDICTS =
             new ConcurrentHashMap<String, Boolean>();
     private static final ExecutorService NET = Executors.newCachedThreadPool();
+    private static final Set<String> INFLIGHT = new HashSet<String>();
     private static volatile Context lastApp;
+    /** True while the selected subtitle track is English; the cleaner leaves other languages alone. */
+    private static volatile boolean activeEnglish;
+    private static final long USER_GRACE_MS = 15000L;
     private static final int SAMPLE_CUES = 40;
     private static final int MAX_SWITCHES_PER_MEDIA = 4;
 
@@ -91,7 +95,7 @@ public final class SdhAvoid {
         try {
             if (cues == null || cues.isEmpty()) return cues;
             Context app = lastApp;
-            if (app == null || !SdhPrefs.isCleanEnabled(app)) return cues;
+            if (app == null || !activeEnglish || !SdhPrefs.isCleanEnabled(app)) return cues;
             List<Object> out = new ArrayList<Object>(cues.size());
             boolean changed = false;
             for (Object item : cues) {
@@ -143,6 +147,7 @@ public final class SdhAvoid {
         Tracks.Group group;
         TrackGroup mediaGroup;
         int index;
+        int ordinal;
         Format format;
         String id;
         String lang;
@@ -162,6 +167,10 @@ public final class SdhAvoid {
         private String samplingId;
         private int switches;
         private int generation;
+        private boolean userLocked;
+        private String lastAutoId;
+        private String lastSeenId;
+        private long firstEvalAt;
 
         private final Player.Listener listener = new Player.Listener() {
             @Override
@@ -170,6 +179,15 @@ public final class SdhAvoid {
                     evaluate();
                 } catch (Throwable error) {
                     Log.w(TAG, "rank failed", error);
+                }
+            }
+
+            @Override
+            public void onMediaItemTransition(MediaItem mediaItem, int reason) {
+                try {
+                    resetMedia();
+                } catch (Throwable error) {
+                    Log.w(TAG, "reset failed", error);
                 }
             }
 
@@ -217,6 +235,10 @@ public final class SdhAvoid {
             samplingId = null;
             switches = 0;
             generation++;
+            userLocked = false;
+            lastAutoId = null;
+            lastSeenId = null;
+            firstEvalAt = 0L;
         }
 
         private String mediaKey() {
@@ -240,9 +262,12 @@ public final class SdhAvoid {
                 return out;
             }
             if (tracks == null) return out;
+            int groupNumber = 0;
+            int ordinal = 0;
             try {
                 for (Tracks.Group group : tracks.getGroups()) {
                     if (group.getType() != C.TRACK_TYPE_TEXT) continue;
+                    groupNumber++;
                     TrackGroup mediaGroup;
                     try {
                         mediaGroup = group.getMediaTrackGroup();
@@ -262,9 +287,11 @@ public final class SdhAvoid {
                         entry.group = group;
                         entry.mediaGroup = mediaGroup;
                         entry.index = i;
+                        entry.ordinal = ordinal++;
                         entry.format = format;
                         entry.id = format.id == null
-                                ? "emb:" + i + ":" + String.valueOf(format.language) : format.id;
+                                ? "emb:" + groupNumber + ":" + i + ":" + String.valueOf(format.language)
+                                : format.id;
                         entry.lang = SdhLabels.normLang(format.language);
                         entry.label = format.label;
                         entry.kind = SdhLabels.kindOf(format.label, format.roleFlags,
@@ -301,6 +328,27 @@ public final class SdhAvoid {
                 }
             }
             if (selected == null) return;
+            activeEnglish = "en".equals(selected.lang);
+            if (!activeEnglish) {
+                // Other languages use brackets for signs and names: leave them untouched.
+                samplingId = null;
+                sample.clear();
+                return;
+            }
+            long now = SystemClock.elapsedRealtime();
+            if (firstEvalAt == 0L) firstEvalAt = now;
+            if (userLocked) return;
+            if (lastSeenId != null && !selected.id.equals(lastSeenId)
+                    && !selected.id.equals(lastAutoId)
+                    && (lastAutoId != null || now - firstEvalAt > USER_GRACE_MS)) {
+                // The track changed without us: a manual pick, so stop auto-switching here.
+                userLocked = true;
+                samplingId = null;
+                sample.clear();
+                Log.i(TAG, "manual subtitle pick " + selected.id + ", auto-switch off for this media");
+                return;
+            }
+            lastSeenId = selected.id;
             if (switchedAway.contains(selected.id)) return;
             String prefLang = selected.lang;
             List<Entry> pool = new ArrayList<Entry>();
@@ -319,7 +367,7 @@ public final class SdhAvoid {
                 @Override
                 public int compare(Entry a, Entry b) {
                     if (a.kind != b.kind) return a.kind - b.kind;
-                    return a.index - b.index;
+                    return a.ordinal - b.ordinal;
                 }
             });
             boolean allSdh = true;
@@ -363,7 +411,7 @@ public final class SdhAvoid {
         }
 
         private void sampleCues(CueGroup cueGroup) {
-            if (samplingId == null || cueGroup == null || cueGroup.cues == null) return;
+            if (samplingId == null || userLocked || cueGroup == null || cueGroup.cues == null) return;
             if (!SdhPrefs.isAvoidEnabled(activity)) {
                 samplingId = null;
                 sample.clear();
@@ -410,7 +458,7 @@ public final class SdhAvoid {
                 @Override
                 public int compare(Entry a, Entry b) {
                     if (a.kind != b.kind) return a.kind - b.kind;
-                    return a.index - b.index;
+                    return a.ordinal - b.ordinal;
                 }
             });
             for (Entry entry : pool) {
@@ -432,6 +480,7 @@ public final class SdhAvoid {
                 onAddonVerdict(entry, pool, url, known.booleanValue());
                 return;
             }
+            if (!INFLIGHT.add(url)) return;
             final int gen = generation;
             final String media = mediaKey;
             NET.execute(new Runnable() {
@@ -460,6 +509,7 @@ public final class SdhAvoid {
                         @Override
                         public void run() {
                             try {
+                                INFLIGHT.remove(url);
                                 if (gen != generation || !media.equals(mediaKey)) return;
                                 if (!haveVerdict) return;
                                 onAddonVerdict(entry, pool, url, verdict);
@@ -490,7 +540,7 @@ public final class SdhAvoid {
         }
 
         private void switchTo(Entry entry, String why) {
-            if (switches >= MAX_SWITCHES_PER_MEDIA) return;
+            if (userLocked || switches >= MAX_SWITCHES_PER_MEDIA) return;
             String currentId = null;
             List<Entry> entries = textEntries();
             for (Entry candidate : entries) {
@@ -511,6 +561,8 @@ public final class SdhAvoid {
             }
             switches++;
             generation++;
+            lastAutoId = entry.id;
+            lastSeenId = entry.id;
             if (currentId != null) switchedAway.add(currentId);
             sample.clear();
             samplingId = null;
