@@ -222,6 +222,7 @@ public final class IntroSkipBridge {
         private String identity;
         private String loadedKey;
         private long fetchedLength;
+        private String[] cachedVideoId;
         private String lastSnapshot;
         private MediaInfo pendingInfo;
         private long readySince;
@@ -247,6 +248,7 @@ public final class IntroSkipBridge {
         private double lastPos = -1;
         private double flowPos = -1;
         private int flowTicks;
+        private int steadyTicks;
         private long lastPollAt;
         private Segment current;
         private boolean currentBySeek;
@@ -340,7 +342,6 @@ public final class IntroSkipBridge {
                 showDebugDialog();
             }
             if (!wasRunning) {
-                installKeys();
                 MAIN.post(tick);
             }
         }
@@ -354,6 +355,7 @@ public final class IntroSkipBridge {
             identity = null;
             loadedKey = null;
             fetchedLength = -1;
+            cachedVideoId = null;
             lastSnapshot = null;
             pendingInfo = null;
             readySince = 0;
@@ -387,6 +389,7 @@ public final class IntroSkipBridge {
             lastPos = -1;
             flowPos = -1;
             flowTicks = 0;
+            steadyTicks = 0;
             okDownConsumed = false;
             manualArmed = false;
             lastPollAt = 0;
@@ -514,8 +517,23 @@ public final class IntroSkipBridge {
             boolean jumped = jumpedBack || jumpedForward;
             double moved = flowPos < 0 ? 0 : pos - flowPos;
             flowPos = pos;
-            if (!playing || moved < 0 || moved >= 1.5) flowTicks = 0;
-            else if (moved > 0) flowTicks++;
+            if (!playing || moved < 0 || moved >= 1.5) {
+                flowTicks = 0;
+            } else if (moved > 0) {
+                flowTicks++;
+                if (steadyTicks < 10) steadyTicks++;
+            }
+            // If the user rewinds to before a previously skipped segment (> 2 s before its start),
+            // re-arm auto-skip for that segment so playing naturally into it skips again.
+            if (jumpedBack && !autoSkipped.isEmpty()) {
+                for (Segment s : segments) {
+                    if (pos < s.startSeconds - 2.0 && wasSkipped(s)) {
+                        autoSkipped.remove(s.key());
+                        autoSkipped.remove(s.label);
+                        log("Re-armed " + s.label + " after rewind before start (pos=" + fmt(pos) + "s)");
+                    }
+                }
+            }
             lastPos = pos;
             lastPollAt = now;
             if (playing && firstPlayingAt == 0) firstPlayingAt = now;
@@ -553,17 +571,17 @@ public final class IntroSkipBridge {
             Segment segment = segments.isEmpty() ? null : segmentAt(pos);
             if (segment != current) {
                 current = segment;
-                // A rewind into the segment (within 5 s of a seek key) or a forward jump deep
-                // (>= 8 s) into the segment within 1.5 s of a seek key is a deliberate user seek.
-                // Fast-forwarding up to the intro (or NEXT_SYNC snapping onto the intro keyframe)
+                // A rewind into the segment (within 3 s of a seek key) or a forward jump deep
+                // (>= 15 s) into the segment within 1.2 s of a seek key is a deliberate user seek.
+                // Fast-forwarding up to the intro (even when NEXT_SYNC snaps several seconds inside)
                 // still auto-skips when the segment has not been skipped yet.
                 currentByJump = segment != null && jumped;
                 double lag = segment == null ? 0.0 : pos - segment.startSeconds;
                 boolean warm = firstPlayingAt != 0 && now - firstPlayingAt > 3000L;
                 boolean deliberateSeek = segment != null && warm
-                        && ((jumpedBack && now - lastSeekKeyAt < 5000L)
-                        || (jumpedForward && now - lastSeekKeyAt < 1500L
-                        && (wasSkipped(segment) || lag >= 8.0)));
+                        && ((jumpedBack && now - lastSeekKeyAt < 3000L)
+                        || (jumpedForward && now - lastSeekKeyAt < 1200L
+                        && (wasSkipped(segment) || lag >= 15.0)));
                 currentBySeek = deliberateSeek || (segment != null && inheritSeek);
                 if (segment != null) {
                     log("Segment entered " + segment.label + " pos=" + fmt(pos) + "s (start "
@@ -579,9 +597,10 @@ public final class IntroSkipBridge {
             boolean autoPending = segment != null && !currentBySeek && autoWanted
                     && !wasSkipped(segment)
                     && (!currentByJump || jumpCount == null || jumpCount < 3);
-            boolean flowReady = flowTicks >= 3
-                    || (firstPlayingAt != 0 && now - firstPlayingAt > 1500L
-                    && (flowTicks >= 1 || (segment != null && pos - segment.startSeconds < 1.0)));
+            // Once the decoder has produced 3 steady ticks in this session (or played > 1.5 s),
+            // do not require post-seek ticks before firing auto-skip.
+            boolean flowReady = flowTicks >= 3 || steadyTicks >= 3
+                    || (firstPlayingAt != 0 && now - firstPlayingAt > 1500L);
             if (autoPending && playing && flowReady) {
                 if (currentByJump) jumpSkips.put(segment.key(), jumpCount == null ? 1 : jumpCount + 1);
                 skip(segment, true, pos, durationMs);
@@ -673,8 +692,6 @@ public final class IntroSkipBridge {
             if (durationMs > 0 && target * 1000.0 > durationMs - 1000.0) {
                 target = Math.max(segment.startSeconds, (durationMs - 1000.0) / 1000.0);
             }
-            autoSkipped.add(segment.key());
-            autoSkipped.add(segment.label);
             String mode;
             skippedAt = SystemClock.uptimeMillis();
             try {
@@ -682,6 +699,10 @@ public final class IntroSkipBridge {
             } catch (Throwable error) {
                 log("ERROR seek: " + error);
                 return;
+            }
+            if (!automatic || target - pos >= 3.0) {
+                autoSkipped.add(segment.key());
+                autoSkipped.add(segment.label);
             }
             guardUntil = SystemClock.uptimeMillis() + 2500L;
             guardTarget = target;
@@ -757,10 +778,17 @@ public final class IntroSkipBridge {
             }
             identity = id;
             if (movie) return;
-            String[] stremioKind = stremioVideoId(anchor);
-            if (stremioKind != null && parseInt(stremioKind[1]) == 0 && parseInt(stremioKind[2]) == 0) {
-                markMovie();
-                return;
+            // Defer chapter HTTP range requests and metadata reflection until the initial 2 s
+            // startup buffer is playing smoothly so we never stall ExoPlayer at stream start.
+            boolean startupSettled = (firstPlayingAt != 0 && now - firstPlayingAt >= 2000L)
+                    || now - attachedAt >= 4000L;
+            if (!startupSettled) return;
+            if (cachedVideoId == null) {
+                cachedVideoId = stremioVideoId(anchor);
+                if (cachedVideoId != null && parseInt(cachedVideoId[1]) == 0 && parseInt(cachedVideoId[2]) == 0) {
+                    markMovie();
+                    return;
+                }
             }
             if (!chaptersRequested) {
                 chaptersRequested = true;
@@ -783,7 +811,7 @@ public final class IntroSkipBridge {
                 if (now < nextInfoAt || infoAttempts >= 20) return;
                 infoAttempts++;
                 nextInfoAt = now + 1500L;
-                MediaInfo info = mediaInfoFor(player, anchor);
+                MediaInfo info = mediaInfoFor(player, anchor, cachedVideoId);
                 if (!info.snapshot.equals(lastSnapshot)) {
                     lastSnapshot = info.snapshot;
                     log("MEDIA\n" + info.debug);
@@ -925,10 +953,7 @@ public final class IntroSkipBridge {
             }
         }
 
-        /**
-         * When AniSkip has segments for the anime, it is authoritative for recaps/credits;
-         * only fall back to IntroDB for an OP if AniSkip returned no OP.
-         */
+        /** Keeps AniSkip first, and fills any missing segment type (e.g. OP) from IntroDB. */
         private void mergeOnline(List<Segment> primary, List<Segment> fallback) {
             List<Segment> merged = new ArrayList<>();
             if (primary != null) merged.addAll(primary);
@@ -936,6 +961,21 @@ public final class IntroSkipBridge {
             if (fallback != null) {
                 for (Segment s : fallback) {
                     if (hadPrimary && !"OP".equals(s.label)) continue;
+                    if ("OP".equals(s.label) && chapters != null && !chapters.isEmpty()) {
+                        for (int i = 0; i < merged.size(); i++) {
+                            Segment p = merged.get(i);
+                            if ("OP".equals(p.label)
+                                    && nearestBoundary(p.startSeconds, chapters) < 0
+                                    && nearestBoundary(s.startSeconds, chapters) >= 0
+                                    && nearestBoundary(s.endSeconds, chapters) >= 0) {
+                                log("Preferring chapter-aligned IntroDB OP (" + fmt3(s.startSeconds)
+                                        + "-" + fmt3(s.endSeconds) + ") over unaligned AniSkip OP ("
+                                        + fmt3(p.startSeconds) + "-" + fmt3(p.endSeconds) + ")");
+                                merged.remove(i);
+                                break;
+                            }
+                        }
+                    }
                     if (!hasSegmentType(merged, s.label) && !overlaps(merged, s.startSeconds, s.endSeconds)) {
                         merged.add(s);
                     }
@@ -1878,14 +1918,22 @@ public final class IntroSkipBridge {
     }
 
     /** Test-only switches set with `adb shell setprop <name> 1`; off by default. */
+    private static final java.util.Map<String, Boolean> SYSPROPS =
+            new java.util.concurrent.ConcurrentHashMap<String, Boolean>();
+
+    /** Test-only switches set with `adb shell setprop <name> 1`; cached per process. */
     private static boolean sysprop(String name) {
+        Boolean cached = SYSPROPS.get(name);
+        if (cached != null) return cached.booleanValue();
+        boolean result = false;
         try {
             Object value = Class.forName("android.os.SystemProperties")
                     .getMethod("get", String.class).invoke(null, name);
-            return "1".equals(value);
+            result = "1".equals(value);
         } catch (Throwable ignored) {
-            return false;
         }
+        SYSPROPS.put(name, Boolean.valueOf(result));
+        return result;
     }
 
     private static final Pattern CHAPTER_INTRO = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:op\\d*|opening|"
@@ -2037,7 +2085,7 @@ public final class IntroSkipBridge {
         }
     }
 
-    private static MediaInfo mediaInfoFor(Player player, View playerView) {
+    private static MediaInfo mediaInfoFor(Player player, View playerView, String[] presetStremioId) {
         MediaItem item = player.getCurrentMediaItem();
         MediaMetadata playerMetadata = player.getMediaMetadata();
         MediaMetadata itemMetadata = item == null ? null : item.mediaMetadata;
@@ -2081,25 +2129,28 @@ public final class IntroSkipBridge {
             }
         }
 
-        StringBuilder reflective = new StringBuilder();
-        List<String> reflectedTitles = new ArrayList<>();
-        List<String> reflectedEpisodes = new ArrayList<>();
-        Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
-        collectReflectiveCandidates(player, reflectedTitles, reflectedEpisodes, reflective, 0, visited);
-        collectReflectiveCandidates(item, reflectedTitles, reflectedEpisodes, reflective, 0, visited);
-        titleCandidates.addAll(reflectedTitles);
-        episodeCandidates.addAll(reflectedEpisodes);
-
-        String title = firstTitle(titleCandidates);
-        // Stremio puts "<Show> - S01E07 - <Episode>" in the player metadata title: that is the
-        // episode the user picked, so it wins over anything parsed from the stream URL (torrent
-        // URLs carry the file index, e.g. .../6/<file>.mkv for episode 7).
-        int[] metaSxE = metadataSeasonEpisode(playerMetadata, itemMetadata);
-        // Stremio's own video id ("tt1844624:13:1") comes first: it does not depend on the addon.
-        String[] stremioId = stremioVideoId(playerView);
+        String[] stremioId = presetStremioId != null ? presetStremioId : stremioVideoId(playerView);
         int vidEpisode = stremioId == null ? 0 : parseInt(stremioId[2]);
-        int episode = vidEpisode > 0 ? vidEpisode
+        int[] metaSxE = metadataSeasonEpisode(playerMetadata, itemMetadata);
+        String fastTitle = firstTitle(titleCandidates);
+        int fastEpisode = vidEpisode > 0 ? vidEpisode
                 : metaSxE[1] > 0 ? metaSxE[1] : firstEpisode(episodeCandidates);
+
+        // Only walk the player object graph via reflection when fast metadata did not yield
+        // both a usable title and an episode number.
+        StringBuilder reflective = new StringBuilder();
+        if (fastTitle.length() == 0 || fastEpisode <= 0) {
+            List<String> reflectedTitles = new ArrayList<>();
+            List<String> reflectedEpisodes = new ArrayList<>();
+            Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
+            collectReflectiveCandidates(player, reflectedTitles, reflectedEpisodes, reflective, 0, visited);
+            collectReflectiveCandidates(item, reflectedTitles, reflectedEpisodes, reflective, 0, visited);
+            titleCandidates.addAll(reflectedTitles);
+            episodeCandidates.addAll(reflectedEpisodes);
+        }
+
+        String title = fastTitle.length() > 0 ? fastTitle : firstTitle(titleCandidates);
+        int episode = fastEpisode > 0 ? fastEpisode : firstEpisode(episodeCandidates);
         if (episode == 0) {
             episode = fallbackTrackNumber(playerMetadata, itemMetadata);
         }
