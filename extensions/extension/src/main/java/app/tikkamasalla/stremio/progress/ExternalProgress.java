@@ -221,6 +221,15 @@ public final class ExternalProgress {
             }
             launchedAt = System.currentTimeMillis();
             externalSessionOpen = true;
+            BINGE_ARMED.set(false);
+            try {
+                Context context = appContext;
+                if (context != null) {
+                    context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                            .edit().putBoolean(KEY_PENDING, false).apply();
+                }
+            } catch (Throwable ignored) {
+            }
             stopInternalPlayer(lastBingeFragment == null ? null : lastBingeFragment.get());
             ensureExplicitPlayer(intent);
             applyHandoff(intent);
@@ -622,13 +631,34 @@ public final class ExternalProgress {
      * without season and episode clears the flag.
      * Fail soft: any problem returns false so internal playback continues.
      */
+    private static Context ensureContext(Object fragment) {
+        Context context = appContext;
+        if (context != null || fragment == null) return context;
+        try {
+            Object c = invoke(fragment, "getContext");
+            if (!(c instanceof Context)) {
+                c = invoke(fragment, "getActivity");
+            }
+            if (c instanceof Context) {
+                remember((Context) c);
+            }
+        } catch (Throwable ignored) {
+        }
+        return appContext;
+    }
+
     public static boolean maybeBinge(Object fragment, Object stream) {
         try {
             long now = System.currentTimeMillis();
             playbackStartedAt = now;
             int seq = BINGE_SEQ.incrementAndGet();
-            Context context = appContext;
-            if (context == null || fragment == null) return false;
+            Context context = ensureContext(fragment);
+            if (context == null || fragment == null) {
+                Log.i("BingeDbg", "startStreamPlayback seq=" + seq
+                        + " context=" + (context != null) + " fragment=" + (fragment != null)
+                        + " action=PASS_NO_CTX");
+                return false;
+            }
             android.content.SharedPreferences prefs =
                     context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE);
             boolean inFlight = now < bingeInFlightUntil || externalSessionOpen;
@@ -655,11 +685,19 @@ public final class ExternalProgress {
             long armedAt = prefs.getLong(KEY_ARMED_AT, 0L);
             if (now - armedAt > BINGE_TTL_MS) {
                 Log.i(TAG, "binge flag expired");
+                Log.i("BingeDbg", "startStreamPlayback seq=" + seq + " pending=true inFlight=" + inFlight
+                        + " internalPlaying=" + isInternalPlaying(fragment) + " action=PASS_EXPIRED");
                 return false;
             }
-            if (!prefs.getBoolean(KEY_BINGE, true)) return false;
+            if (!prefs.getBoolean(KEY_BINGE, true)) {
+                Log.i("BingeDbg", "startStreamPlayback seq=" + seq + " pending=true inFlight=" + inFlight
+                        + " internalPlaying=" + isInternalPlaying(fragment) + " action=PASS_BINGE_OFF");
+                return false;
+            }
             if (isMovieFragment(fragment)) {
                 Log.i(TAG, "binge skipped: movie");
+                Log.i("BingeDbg", "startStreamPlayback seq=" + seq + " pending=true inFlight=" + inFlight
+                        + " internalPlaying=" + isInternalPlaying(fragment) + " action=PASS_MOVIE");
                 return false;
             }
             try {

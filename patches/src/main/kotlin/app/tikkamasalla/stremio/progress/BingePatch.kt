@@ -46,9 +46,9 @@ val bingeExternalPatch = bytecodePatch(
                 """
                     invoke-static {p0, p1}, $EXTENSION->maybeBinge(Ljava/lang/Object;Ljava/lang/Object;)Z
                     move-result v0
-                    if-nez v0, :binge_handled
+                    if-eqz v0, :binge_pass
                     return-void
-                    :binge_handled
+                    :binge_pass
                     nop
                 """.trimIndent(),
             )
