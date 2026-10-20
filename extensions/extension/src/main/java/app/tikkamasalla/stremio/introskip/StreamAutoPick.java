@@ -64,6 +64,7 @@ public final class StreamAutoPick {
                 FIRST_AT.put(fragment, now);
                 TIMER_4.put(fragment, false);
                 TIMER_8.put(fragment, false);
+                prefetchAliases(metaNameOf(state));
                 schedule(fragment, videoId, WAIT_MS, 4);
                 schedule(fragment, videoId, WAIT_NOCACHE_MS, 8);
                 return;
@@ -300,37 +301,177 @@ public final class StreamAutoPick {
         }
     }
 
+    private static final Map<String, List<String>> ALIAS_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<String, List<String>>();
+    private static final java.util.Set<String> ALIAS_INFLIGHT =
+             java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    private static final String[][] STATIC_ALIASES = new String[][] {
+        {"attack on titan", "shingeki no kyojin"},
+        {"demon slayer", "kimetsu no yaiba"},
+        {"my hero academia", "boku no hero academia"},
+        {"frieren beyond journeys end", "sousou no frieren"},
+        {"fullmetal alchemist", "hagane no renkinjutsushi"},
+        {"hunter x hunter", "hxh"},
+        {"one punch man", "wanpanman"},
+        {"mob psycho 100", "mob psycho hyaku"},
+        {"apothecary diaries", "kusuriya no hitorigoto"},
+        {"solo leveling", "ore dake level up na ken"},
+        {"delicious in dungeon", "dungeon meshi"},
+        {"parasyte", "kiseijuu"},
+        {"erased", "boku dake ga inai machi"},
+        {"promised neverland", "yakusoku no neverland"},
+        {"rascal does not dream", "seishun buta yarou"},
+        {"assassination classroom", "ansatsu kyoushitsu"},
+        {"food wars", "shokugeki no souma"},
+        {"seven deadly sins", "nanatsu no taizai"},
+        {"fire force", "enen no shouboutai"},
+        {"hells paradise", "jigokuraku"},
+        {"kaiju no 8", "kaijuu 8 gou"},
+        {"neon genesis evangelion", "shin seiki evangelion"},
+        {"konosuba", "kono subarashii sekai ni shukufuku wo"},
+        {"reincarnated as a slime", "tensei shitara slime datta ken"},
+        {"dan da dan", "dandadan"}
+    };
+
+    private static String normKey(String s) {
+        if (s == null) return "";
+        return s.toLowerCase(java.util.Locale.US)
+                .replaceAll("\\s*[(\\[]\\s*(?:19|20)\\d{2}[^)\\]]*[)\\]]\\s*$", "")
+                .replaceAll("[^a-z0-9]+", " ").trim();
+    }
+
+    private static List<String> aliasesFor(String metaName) {
+        String key = normKey(metaName);
+        List<String> list = new ArrayList<String>();
+        if (key.length() == 0) return list;
+        list.add(key);
+        for (int i = 0; i < STATIC_ALIASES.length; i++) {
+            String a = STATIC_ALIASES[i][0];
+            String b = STATIC_ALIASES[i][1];
+            if (key.contains(a) || a.contains(key)) list.add(b);
+            if (key.contains(b) || b.contains(key)) list.add(a);
+        }
+        List<String> dynamic = ALIAS_CACHE.get(key);
+        if (dynamic != null) {
+            for (String d : dynamic) {
+                if (!list.contains(d)) list.add(d);
+            }
+        }
+        return list;
+    }
+
+    /**
+     * Queries AniList for the canonical romaji + english titles (not localized synonyms, so
+     * Italian/French/German dub titles stay filtered out) during the 4 s auto-pick wait window.
+     */
+    private static void prefetchAliases(final String metaName) {
+        final String key = normKey(metaName);
+        if (key.length() < 2 || ALIAS_CACHE.containsKey(key) || !ALIAS_INFLIGHT.add(key)) return;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                java.net.HttpURLConnection conn = null;
+                try {
+                    String clean = metaName.replaceAll("\\s*[(\\[]\\s*(?:19|20)\\d{2}[^)\\]]*[)\\]]\\s*$", "").trim();
+                    org.json.JSONObject body = new org.json.JSONObject()
+                            .put("query", "query ($s: String) { Page(perPage: 5) { media(search: $s, type: ANIME) { title { romaji english } } } }")
+                            .put("variables", new org.json.JSONObject().put("s", clean));
+                    conn = (java.net.HttpURLConnection) new java.net.URL("https://graphql.anilist.co").openConnection();
+                    conn.setRequestMethod("POST");
+                    conn.setConnectTimeout(2500);
+                    conn.setReadTimeout(2500);
+                    conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                    conn.setRequestProperty("Accept", "application/json");
+                    conn.setDoOutput(true);
+                    byte[] payload = body.toString().getBytes("UTF-8");
+                    java.io.OutputStream os = conn.getOutputStream();
+                    os.write(payload);
+                    os.close();
+                    if (conn.getResponseCode() != 200) return;
+                    java.io.BufferedReader br = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(conn.getInputStream(), "UTF-8"));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = br.readLine()) != null) sb.append(line);
+                    br.close();
+                    org.json.JSONArray media = new org.json.JSONObject(sb.toString())
+                            .optJSONObject("data").optJSONObject("Page").optJSONArray("media");
+                    if (media == null) return;
+                    List<String> found = new ArrayList<String>();
+                    for (int i = 0; i < media.length(); i++) {
+                        org.json.JSONObject t = media.optJSONObject(i) == null ? null
+                                : media.optJSONObject(i).optJSONObject("title");
+                        if (t == null) continue;
+                        String eng = normKey(t.optString("english", ""));
+                        String rom = normKey(t.optString("romaji", ""));
+                        if (eng.equals(key) || rom.equals(key)
+                                || (eng.length() > 3 && eng.startsWith(key))
+                                || (rom.length() > 3 && rom.startsWith(key))) {
+                            if (rom.length() > 0 && !found.contains(rom)) found.add(rom);
+                            if (eng.length() > 0 && !found.contains(eng)) found.add(eng);
+                        }
+                    }
+                    ALIAS_CACHE.put(key, found);
+                    if (!found.isEmpty()) {
+                        Log.i(TAG, "aliases for '" + metaName + "': " + found);
+                    }
+                } catch (Throwable ignored) {
+                } finally {
+                    ALIAS_INFLIGHT.remove(key);
+                    if (conn != null) {
+                        try { conn.disconnect(); } catch (Throwable ignored) {}
+                    }
+                }
+            }
+        }, "AutoPickAlias").start();
+    }
+
     /**
      * Addons sometimes return streams of other titles (a search for a short name). A stream is
-     * eligible only when it shares a significant word with the title; no usable title means no filter.
+     * eligible when it matches the title or its canonical Romaji/English alias; foreign dub
+     * titles ("L'attacco Dei Giganti") are still rejected.
      */
     private static boolean matchesMeta(String streamText, String metaName) {
         try {
-            String name = metaName == null ? "" : metaName.toLowerCase(java.util.Locale.US);
+            List<String> candidates = aliasesFor(metaName);
+            if (candidates.isEmpty()) return true;
             String text = streamText == null ? "" : streamText.toLowerCase(java.util.Locale.US);
             java.util.Set<String> tokens = new java.util.HashSet<String>();
             for (String t : text.split("[^a-z0-9]+")) {
                 if (t.length() > 0) tokens.add(t);
             }
-            String[] words = name.split("[^a-z0-9]+");
-            // A trailing roman numeral or number ("Planet Earth II") must match exactly.
-            if (words.length > 1) {
-                String last = words[words.length - 1];
-                if (last.matches("ii|iii|iv|v|vi|vii|viii|ix|[2-9]") && !tokens.contains(last)) return false;
+            for (String candidate : candidates) {
+                if (matchesSingleTitle(tokens, candidate)) return true;
             }
-            int significant = 0;
-            for (String word : words) {
-                if (word.length() < 3 || word.equals("the") || word.equals("and") || word.equals("der")
-                        || word.equals("die") || word.equals("das") || word.equals("des")) {
-                    continue;
-                }
-                significant++;
-                if (tokens.contains(word)) return true;
-            }
-            return significant == 0;
+            return false;
         } catch (Throwable ignored) {
             return true;
         }
+    }
+
+    private static boolean matchesSingleTitle(java.util.Set<String> tokens, String name) {
+        String[] words = name.split("[^a-z0-9]+");
+        if (words.length > 1) {
+            String last = words[words.length - 1];
+            if (last.matches("ii|iii|iv|v|vi|vii|viii|ix|[2-9]") && !tokens.contains(last)) return false;
+        }
+        int significant = 0;
+        int matched = 0;
+        for (String word : words) {
+            if (word.length() < 3 || word.equals("the") || word.equals("and") || word.equals("der")
+                    || word.equals("die") || word.equals("das") || word.equals("des")
+                    || word.equals("no") || word.equals("wa") || word.equals("ni") || word.equals("ga")) {
+                continue;
+            }
+            significant++;
+            if (tokens.contains(word)) matched++;
+        }
+        if (significant == 0) return true;
+        // Require at least 2 matching significant words when the title has >= 2 significant words
+        // (so "Shingeki no Kyojin" requires both "shingeki" and "kyojin", and "Attack on Titan"
+        // requires both "attack" and "titan").
+        return significant >= 2 ? matched >= 2 : matched >= 1;
     }
 
     private static String currentVideoId(Object fragment) {

@@ -221,6 +221,7 @@ public final class IntroSkipBridge {
         // media resolution
         private String identity;
         private String loadedKey;
+        private long fetchedLength;
         private String lastSnapshot;
         private MediaInfo pendingInfo;
         private long readySince;
@@ -350,6 +351,7 @@ public final class IntroSkipBridge {
         private void resetMedia() {
             identity = null;
             loadedKey = null;
+            fetchedLength = -1;
             lastSnapshot = null;
             pendingInfo = null;
             readySince = 0;
@@ -742,7 +744,16 @@ public final class IntroSkipBridge {
                 startChapters(item == null || item.localConfiguration == null ? null
                         : item.localConfiguration.uri);
             }
-            if (loadedKey != null) return;
+            if (loadedKey != null) {
+                if (fetchedLength == 0 && durationMs > 0 && pendingInfo != null) {
+                    long realSec = Math.round(durationMs / 1000.0);
+                    if (realSec > 0) {
+                        log("Duration now known (" + realSec + "s): refreshing lookup");
+                        startFetch(pendingInfo, realSec);
+                    }
+                }
+                return;
+            }
             if (pendingInfo == null) {
                 // The metadata scan uses reflection: retry for ~30 s, then stop (movies,
                 // trailers) until the media item changes.
@@ -796,7 +807,8 @@ public final class IntroSkipBridge {
 
         private void startFetch(MediaInfo info, final long episodeLength) {
             loadedKey = info.key;
-            pendingInfo = null;
+            fetchedLength = episodeLength;
+            pendingInfo = info;
             if (!IntroSkipPrefs.isEnabled(activity)) {
                 aniDone = true;
                 introDone = true;
@@ -890,13 +902,17 @@ public final class IntroSkipBridge {
             }
         }
 
-        /** Keeps AniSkip first, and fills any missing segment type (e.g. OP) from IntroDB. */
+        /**
+         * When AniSkip has segments for the anime, it is authoritative for recaps/credits;
+         * only fall back to IntroDB for an OP if AniSkip returned no OP.
+         */
         private void mergeOnline(List<Segment> primary, List<Segment> fallback) {
             List<Segment> merged = new ArrayList<>();
             if (primary != null) merged.addAll(primary);
             boolean hadPrimary = !merged.isEmpty();
             if (fallback != null) {
                 for (Segment s : fallback) {
+                    if (hadPrimary && !"OP".equals(s.label)) continue;
                     if (!hasSegmentType(merged, s.label) && !overlaps(merged, s.startSeconds, s.endSeconds)) {
                         merged.add(s);
                     }
@@ -1424,15 +1440,25 @@ public final class IntroSkipBridge {
             if (!isOkKey(keyCode)) {
                 okDownConsumed = false;
                 if (action == KeyEvent.ACTION_DOWN) {
-                    // Pressing Down or Right while the pill is shown focuses the pill so the user
-                    // can highlight and click it with the TV remote.
-                    if ((keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
-                            && pill != null && !pill.hasFocus() && !controlsVisible()) {
+                    // Pressing Down or Up while the pill is shown (whether OSD is visible or hidden)
+                    // focuses and arms the pill so the user can always toggle and click it.
+                    if ((keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_UP)
+                            && pill != null && !pill.hasFocus()) {
                         pill.requestFocus();
                         armed = true;
                         styleArmed(true);
-                        log("Button focused via D-pad key=" + keyCode);
+                        log("Button focused via D-pad key=" + keyCode + " osd=" + controlsVisible());
                         return true;
+                    }
+                    // Pressing Left, Right, or Back while the pill is focused returns focus to the OSD.
+                    if (pill != null && pill.hasFocus()
+                            && (keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                            || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                            || keyCode == KeyEvent.KEYCODE_BACK)) {
+                        pill.clearFocus();
+                        armed = false;
+                        styleArmed(false);
+                        log("Button focus released to OSD key=" + keyCode);
                     }
                     lastOtherKeyAt = SystemClock.uptimeMillis();
                     if (armed && (pill == null || !pill.hasFocus())) {
@@ -1867,7 +1893,7 @@ public final class IntroSkipBridge {
 
     private static final Pattern CHAPTER_INTRO = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:op\\d*|opening|"
             + "abertura|apertura|ouverture|vorspann|g[ée]n[ée]rique(?: de)? d[ée]but|main titles?|"
-            + "title sequence|theme song)(?:$|[^\\p{L}])|オープニング");
+            + "title sequence|theme song|вступні титри|опенинг|заставка)(?:$|[^\\p{L}])|オープニング");
     /** "Intro" is the cold open in many fansubs ("Intro" 0-114 s, then "OP"): weak evidence only. */
     private static final Pattern CHAPTER_WEAK_INTRO = Pattern.compile(
             "(?iu)(?:^|[^\\p{L}])(?:intro|introduction)(?:$|[^\\p{L}])");
@@ -1875,9 +1901,9 @@ public final class IntroSkipBridge {
             + "story so far|r[ée]sum[ée]|resumen|recapitula[çc][ãa]o|r[üu]ckblick|zusammenfassung)(?:$|[^\\p{L}])|あらすじ");
     private static final Pattern CHAPTER_CREDITS = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:ed\\d*|ending|"
             + "outro|credits|end credits|ending credits|closing credits|end theme|ending theme|"
-            + "encerramento|generique de fin|abspann)(?:$|[^\\p{L}])|エンディング");
+            + "encerramento|generique de fin|abspann|кінцеві титри|заключні титри|эндинг)(?:$|[^\\p{L}])|エンディング");
     private static final Pattern CHAPTER_PREVIEW = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:preview|"
-            + "next episode|trailer|apercu|vorschau)(?:$|[^\\p{L}])|予告");
+            + "next episode|trailer|apercu|vorschau|у наступному епізоді|в следующей серии|превью)(?:$|[^\\p{L}])|予告");
     private static final Pattern CHAPTER_NOT = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:eyecatch)(?:$|[^\\p{L}])");
 
     /** Chapters whose NAME says opening/intro/recap/credits/preview: their exact start/end. */
@@ -2571,11 +2597,24 @@ public final class IntroSkipBridge {
     }
 
     private static void parseAniSkipArray(JSONArray results, List<Segment> segments,
-                                          long episodeLength, DebugLogger logger) {
-        if (results == null) return;
+                                          final long episodeLength, DebugLogger logger) {
+        if (results == null || results.length() == 0) return;
+        List<JSONObject> sorted = new ArrayList<>();
         for (int i = 0; i < results.length(); i++) {
-            JSONObject result = results.optJSONObject(i);
-            if (result == null) continue;
+            JSONObject item = results.optJSONObject(i);
+            if (item != null) sorted.add(item);
+        }
+        Collections.sort(sorted, new java.util.Comparator<JSONObject>() {
+            @Override
+            public int compare(JSONObject a, JSONObject b) {
+                double lenA = a.optDouble("episodeLength", 0.0);
+                double lenB = b.optDouble("episodeLength", 0.0);
+                double diffA = (episodeLength > 0 && lenA > 0) ? Math.abs(lenA - episodeLength) : Double.MAX_VALUE;
+                double diffB = (episodeLength > 0 && lenB > 0) ? Math.abs(lenB - episodeLength) : Double.MAX_VALUE;
+                return Double.compare(diffA, diffB);
+            }
+        });
+        for (JSONObject result : sorted) {
             JSONObject interval = result.optJSONObject("interval");
             if (interval == null) continue;
             double start = interval.optDouble("startTime", -1.0);
@@ -2747,7 +2786,8 @@ public final class IntroSkipBridge {
      * (c) then TheIntroDB with that id + season/episode (+ duration_ms when known),
      * retrying a miss by tvdb_id and then tmdb_id (ids from a keyless Cinemeta
      * meta lookup, cached per show);
-     * (d) then IntroDB.app, but only for segment types TheIntroDB has nothing for.
+     * (d) then IntroDB.app for missing segment types (and a real mid-episode OP
+     * replaces a 0.0s TheIntroDB OP).
      * Runs on a NETWORK thread, never on the main thread, and never blocks AniSkip
      * (separate thread) or chapter skipping.
      */
@@ -2789,6 +2829,11 @@ public final class IntroSkipBridge {
                         continue;
                     }
                     double start = item.isNull("start_ms") ? 0.0 : item.optLong("start_ms", -1L) / 1000.0;
+                    if ("recap".equals(kind) && start <= 0.5) {
+                        logger.log("IntroDB: skipped 0:00 recap (" + start + "s -> "
+                                + (item.optLong("end_ms", -1L) / 1000.0) + "s)");
+                        continue;
+                    }
                     double end;
                     if (item.isNull("end_ms")) {
                         end = -1.0;
@@ -2811,11 +2856,19 @@ public final class IntroSkipBridge {
                     logger.log("Segment IntroDB: " + kind + " " + start + "s -> " + end + "s");
                 }
             }
-            // IntroDB.app fills only the segment types TheIntroDB has nothing for.
-            if (isImdbId(id) && season > 0 && episode > 0
-                    && !(hasSegmentType(out, "OP") && hasSegmentType(out, "recap")
-                    && hasSegmentType(out, "credits") && hasSegmentType(out, "preview"))) {
+            // IntroDB.app fills missing segment types, and also replaces a 0.0s TheIntroDB OP
+            // when IntroDB.app has a real mid-episode OP (startSeconds > 5.0s).
+            if (isImdbId(id) && season > 0 && episode > 0) {
                 for (Segment app : fetchIntroDbApp(id, season, episode, logger)) {
+                    if ("OP".equals(app.label) && app.startSeconds > 5.0) {
+                        for (int i = out.size() - 1; i >= 0; i--) {
+                            if ("OP".equals(out.get(i).label) && out.get(i).startSeconds <= 0.5) {
+                                logger.log("IntroDB.app: replacing 0:00 IntroDB OP with mid-episode OP "
+                                        + app.startSeconds + "s -> " + app.endSeconds + "s");
+                                out.remove(i);
+                            }
+                        }
+                    }
                     if (hasSegmentType(out, app.label)) {
                         logger.log("IntroDB.app: skipped " + app.label + ", TheIntroDB already has it");
                         continue;
