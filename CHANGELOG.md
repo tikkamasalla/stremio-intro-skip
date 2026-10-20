@@ -1,3 +1,9 @@
+## [1.4.0](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.3.0...v1.4.0) (2026-10-20)
+
+### ✨ New Features
+
+* add SkipDB as final skip-data fallback in Stremio and Vimu ([8a255b8](https://github.com/tikkamasalla/stremio-morphe-patches/commit/8a255b895b09f4c17f3a491b3948b4606dba9d50))
+
 ## [1.3.0](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.6...v1.3.0) (2026-10-20)
 
 ### 🐛 Bug Fixes
