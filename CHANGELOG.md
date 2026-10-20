@@ -1,3 +1,9 @@
+## [1.2.5](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.4...v1.2.5) (2026-10-20)
+
+### 🐛 Bug Fixes
+
+* correct inverted binge branch and disarm on external launch ([71fd3b4](https://github.com/tikkamasalla/stremio-morphe-patches/commit/71fd3b494f3604a06aea2699f74a0655ee871f58))
+
 ## [1.2.4](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.3...v1.2.4) (2026-10-20)
 
 ### 🐛 Bug Fixes
