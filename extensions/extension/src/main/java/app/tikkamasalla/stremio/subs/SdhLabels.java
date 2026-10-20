@@ -66,6 +66,11 @@ public final class SdhLabels {
             Pattern.compile("\\uFF3B([^\\uFF3B\\uFF3D]+)\\uFF3D");
     /** Matches parenthesised segments: (...). Trailing colons are handled by the remover. */
     private static final Pattern PAREN_PATTERN = Pattern.compile("\\(([^()]+)\\)");
+    /** Matches CEA-608 speaker/topic chevrons (>> speaker change, >>> topic change). */
+    private static final Pattern SPEAKER_CHEVRON_PATTERN = Pattern.compile("[<>]{2,}[ \\t]*");
+    /** Matches fullwidth parenthesised segments with CJK parens. */
+    private static final Pattern FULL_PAREN_PATTERN =
+            Pattern.compile("\\uFF08([^\\uFF08\\uFF09]+)\\uFF09");
 
     /**
      * Matches on-screen sign translations inside brackets or parentheses,
@@ -515,6 +520,7 @@ public final class SdhLabels {
 
     private static boolean hasSdhSignalInLine(String line) {
         if (isMusicNoteLine(line)) return isMusicDescriptionLine(line);
+        if (SPEAKER_CHEVRON_PATTERN.matcher(line).find()) return true;
         Matcher sqMatcher = SQUARE_BRACKET_PATTERN.matcher(line);
         while (sqMatcher.find()) {
             String inside = sqMatcher.group(1).trim();
@@ -529,6 +535,11 @@ public final class SdhLabels {
         Matcher parenMatcher = PAREN_PATTERN.matcher(line);
         while (parenMatcher.find()) {
             String inside = parenMatcher.group(1).trim();
+            if (!isSignAnnotation(inside) && isSdhBracketOrParenContent(inside, false)) return true;
+        }
+        Matcher fullParenMatcher = FULL_PAREN_PATTERN.matcher(line);
+        while (fullParenMatcher.find()) {
+            String inside = fullParenMatcher.group(1).trim();
             if (!isSignAnnotation(inside) && isSdhBracketOrParenContent(inside, false)) return true;
         }
         if (hasSpeakerLabel(line)) return true;
@@ -741,6 +752,7 @@ public final class SdhLabels {
         String out = removeSdhPatternOnce(text, SQUARE_BRACKET_PATTERN, true);
         out = removeSdhPatternOnce(out, FULL_SQUARE_BRACKET_PATTERN, true);
         out = removeSdhPatternOnce(out, PAREN_PATTERN, false);
+        out = removeSdhPatternOnce(out, FULL_PAREN_PATTERN, false);
         return out;
     }
 
@@ -820,6 +832,7 @@ public final class SdhLabels {
 
     private static String cleanTurnContent(String turn) {
         String s = turn.trim();
+        s = SPEAKER_CHEVRON_PATTERN.matcher(s).replaceAll("");
         s = LEADING_HYPHEN_PATTERN.matcher(s).replaceFirst("$1");
         s = removeInlineMusicSegments(s);
         s = removeSdhBlocksOnce(s);
