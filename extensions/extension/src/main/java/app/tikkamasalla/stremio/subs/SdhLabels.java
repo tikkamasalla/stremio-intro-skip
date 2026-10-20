@@ -21,7 +21,9 @@ import java.util.regex.Pattern;
  * SDH annotation rules adapted from liongalahad-nuviotv-morphe-patches
  * (GPLv3): fullwidth bracket blocks, nested outer-block removal, speaker
  * roles and blocklist, music mood/action and lyric dialogue word lists,
- * inline paired music-marker handling.
+ * inline paired music-marker handling. Chevron stripping and fullwidth
+ * parens follow NuvioTV's native Strip SDH behavior, minus its
+ * character-set paren rule (sound-keyword guard is kept instead).
  */
 public final class SdhLabels {
     private SdhLabels() {
@@ -66,8 +68,16 @@ public final class SdhLabels {
             Pattern.compile("\\uFF3B([^\\uFF3B\\uFF3D]+)\\uFF3D");
     /** Matches parenthesised segments: (...). Trailing colons are handled by the remover. */
     private static final Pattern PAREN_PATTERN = Pattern.compile("\\(([^()]+)\\)");
-    /** Matches CEA-608 speaker/topic chevrons (>> speaker change, >>> topic change). */
-    private static final Pattern SPEAKER_CHEVRON_PATTERN = Pattern.compile("[<>]{2,}[ \\t]*");
+    /** Matches CEA-608 speaker/topic chevrons (>> speaker change, >>> topic change).
+     * Same-direction runs only, so emoticons (><, <>) and HTML tag boundaries
+     * (<i><b>) never match. Leading/trailing runs are stripped outside tags;
+     * mid-line runs become turn breaks in cleanSingleLine. */
+    private static final Pattern LEADING_CHEVRON_PATTERN = Pattern.compile(
+            "^((?:(?i:<i>)\\s*|[ \\t\\-\\u2013\\u2014])*)(?:>{2,}|<{2,})[ \\t]*");
+    private static final Pattern TRAILING_CHEVRON_PATTERN = Pattern.compile(
+            "[ \\t]*(?:>{2,}|<{2,})((?:\\s*(?i:</i>))*\\s*)$");
+    private static final Pattern MIDLINE_CHEVRON_PATTERN = Pattern.compile(
+            "(?<![<>\\w])(?:>{2,}(?![<>])|<{2,}(?![<>/A-Za-z]))");
     /** Matches fullwidth parenthesised segments with CJK parens. */
     private static final Pattern FULL_PAREN_PATTERN =
             Pattern.compile("\\uFF08([^\\uFF08\\uFF09]+)\\uFF09");
@@ -105,7 +115,7 @@ public final class SdhLabels {
      */
     private static final Pattern SPEAKER_COLON_PATTERN = Pattern.compile(
             "^(?:[-\\u2013\\u2014]\\s*)?(?:(?i:<i>)\\s*)?([A-Z][A-Z0-9\\s.'#&\\-\\u2013\\u2014]{1,24})"
-                    + "(?:\\s*\\([^()\\r\\n]{1,24}\\))?:\\s*(?:(?i:</i>)\\s*)?");
+                    + "(?:\\s*(?:\\([^()\\r\\n]{1,24}\\)|\\uFF08[^\\uFF08\\uFF09\\r\\n]{1,24}\\uFF09))?:\\s*(?:(?i:</i>)\\s*)?");
     /**
      * Matches ALL-CAPS bracketed speaker labels: "[JOHN]", "[MAN 2]",
      * "- [WOMAN]". Group 1 is the name candidate.
@@ -127,7 +137,8 @@ public final class SdhLabels {
     private static final Pattern SPEAKER_ROLE_PATTERN = Pattern.compile(
             "^(?:man|woman|boy|girl|child|narrator|announcer|tv announcer|radio announcer|reporter|interviewer|host|operator|dispatcher|caller|spouse|husband|wife|mother|father|lawyer|attorney|judge|waiter|waitress|doctor|nurse|officer|detective|teacher|student|crowd|all|voice|voices|tom|john|mike|sarah)$",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    private static final Pattern PAREN_QUALIFIER_PATTERN = Pattern.compile("\\s*\\([^()]{1,24}\\)\\s*$");
+    private static final Pattern PAREN_QUALIFIER_PATTERN = Pattern.compile(
+            "\\s*(?:\\([^()]{1,24}\\)|\\uFF08[^\\uFF08\\uFF09]{1,24}\\uFF09)\\s*$");
     private static final Set<String> SPEAKER_BLOCKLIST = new HashSet<String>(Arrays.asList(
             "at", "chapter", "http", "https", "note", "ratio", "rule", "scene",
             "time", "visit", "warning"));
@@ -519,8 +530,8 @@ public final class SdhLabels {
     }
 
     private static boolean hasSdhSignalInLine(String line) {
+        if (!isWholeSignBlock(line) && hasChevronSignal(line)) return true;
         if (isMusicNoteLine(line)) return isMusicDescriptionLine(line);
-        if (SPEAKER_CHEVRON_PATTERN.matcher(line).find()) return true;
         Matcher sqMatcher = SQUARE_BRACKET_PATTERN.matcher(line);
         while (sqMatcher.find()) {
             String inside = sqMatcher.group(1).trim();
@@ -548,6 +559,25 @@ public final class SdhLabels {
 
     private static boolean isSignAnnotation(String inside) {
         return SIGN_PREFIX_PATTERN.matcher(inside).find();
+    }
+
+    /** True when the whole turn is one sign-translation block, which is kept verbatim. */
+    private static boolean isWholeSignBlock(String s) {
+        String t = ALL_HTML_TAG_PATTERN.matcher(s).replaceAll("").trim();
+        if (t.length() < 2) return false;
+        char first = t.charAt(0);
+        char last = t.charAt(t.length() - 1);
+        if (!((first == '[' && last == ']') || (first == '(' && last == ')')
+                || (first == '\uFF3B' && last == '\uFF3D')
+                || (first == '\uFF08' && last == '\uFF09'))) return false;
+        return isSignAnnotation(t.substring(1, t.length() - 1).trim());
+    }
+
+    /** True when chevrons needing cleanup appear anywhere in the turn. */
+    private static boolean hasChevronSignal(String line) {
+        return LEADING_CHEVRON_PATTERN.matcher(line).find()
+                || TRAILING_CHEVRON_PATTERN.matcher(line).find()
+                || MIDLINE_CHEVRON_PATTERN.matcher(line).find();
     }
 
     private static boolean isSdhBracketOrParenContent(String inside, boolean isSquareBracket) {
@@ -765,7 +795,8 @@ public final class SdhLabels {
             String inside = m.group(1).trim();
             if (!isSignAnnotation(inside) && isSdhBracketOrParenContent(inside, isSquare)) {
                 int end = m.end();
-                if (end < text.length() && (text.charAt(end) == ':' || text.charAt(end) == ';')
+                if (end < text.length() && (text.charAt(end) == ':' || text.charAt(end) == ';'
+                        || text.charAt(end) == '\uFF1A')
                         && leadingIsBlankOrMarker(text, m.start())) {
                     end++;
                     while (end < text.length()
@@ -792,10 +823,39 @@ public final class SdhLabels {
     }
 
     private static CleaningResult cleanSingleLine(String line) {
-        String plainForTurns = ALL_HTML_TAG_PATTERN.matcher(line).replaceAll("").trim();
+        String src = line;
+        if (!isWholeSignBlock(src)) {
+            src = LEADING_CHEVRON_PATTERN.matcher(src).replaceAll("$1");
+            String[] parts = MIDLINE_CHEVRON_PATTERN.split(src);
+            if (parts.length > 1) {
+                List<String> cleanedTurns = new ArrayList<String>(parts.length);
+                int totalTurns = 0;
+                for (int i = 0; i < parts.length; i++) {
+                    CleaningResult r = cleanDashTurns(parts[i].trim());
+                    if (!r.text.isEmpty()) {
+                        cleanedTurns.add(r.text);
+                        totalTurns += r.turnCount;
+                    }
+                }
+                if (cleanedTurns.isEmpty()) return new CleaningResult("", 0);
+                if (cleanedTurns.size() == 1) return new CleaningResult(cleanedTurns.get(0), 1);
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < cleanedTurns.size(); i++) {
+                    if (i > 0) sb.append(" - ");
+                    else sb.append("- ");
+                    sb.append(cleanedTurns.get(i));
+                }
+                return new CleaningResult(sb.toString(), totalTurns);
+            }
+        }
+        return cleanDashTurns(src);
+    }
+
+    private static CleaningResult cleanDashTurns(String src) {
+        String plainForTurns = ALL_HTML_TAG_PATTERN.matcher(src).replaceAll("").trim();
         boolean startsWithHyphen = plainForTurns.startsWith("-")
                 || plainForTurns.startsWith("\u2013") || plainForTurns.startsWith("\u2014");
-        Matcher splitMatcher = INLINE_TURN_SPLIT_PATTERN.matcher(line);
+        Matcher splitMatcher = INLINE_TURN_SPLIT_PATTERN.matcher(src);
         List<Integer> splitStarts = new ArrayList<Integer>(2);
         List<Integer> splitEnds = new ArrayList<Integer>(2);
         while (splitMatcher.find()) {
@@ -807,8 +867,8 @@ public final class SdhLabels {
             for (int i = 0; i < splitStarts.size(); i++) {
                 int contentStart = splitEnds.get(i).intValue();
                 int contentEnd =
-                        (i + 1 < splitStarts.size()) ? splitStarts.get(i + 1).intValue() : line.length();
-                String rawTurn = line.substring(contentStart, contentEnd).trim();
+                        (i + 1 < splitStarts.size()) ? splitStarts.get(i + 1).intValue() : src.length();
+                String rawTurn = src.substring(contentStart, contentEnd).trim();
                 String cleanedTurn = cleanTurnContent(rawTurn);
                 if (!cleanedTurn.isEmpty()) cleanedTurns.add(cleanedTurn);
             }
@@ -822,7 +882,7 @@ public final class SdhLabels {
             }
             return new CleaningResult(sb.toString(), cleanedTurns.size());
         }
-        String cleaned = cleanTurnContent(line);
+        String cleaned = cleanTurnContent(src);
         if (cleaned.isEmpty()) return new CleaningResult("", 0);
         if (startsWithHyphen && !cleaned.startsWith("-") && !cleaned.startsWith("<i>-")) {
             cleaned = "- " + cleaned;
@@ -832,7 +892,10 @@ public final class SdhLabels {
 
     private static String cleanTurnContent(String turn) {
         String s = turn.trim();
-        s = SPEAKER_CHEVRON_PATTERN.matcher(s).replaceAll("");
+        if (!isWholeSignBlock(s)) {
+            s = LEADING_CHEVRON_PATTERN.matcher(s).replaceAll("$1");
+            s = TRAILING_CHEVRON_PATTERN.matcher(s).replaceAll("$1");
+        }
         s = LEADING_HYPHEN_PATTERN.matcher(s).replaceFirst("$1");
         s = removeInlineMusicSegments(s);
         s = removeSdhBlocksOnce(s);
