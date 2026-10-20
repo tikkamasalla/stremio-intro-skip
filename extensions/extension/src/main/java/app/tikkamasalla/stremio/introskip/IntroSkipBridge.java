@@ -258,6 +258,7 @@ public final class IntroSkipBridge {
         private boolean inheritSeek;
         private long guardUntil;
         private double guardTarget;
+        private Segment guardSegment;
         private long landingCheckAt;
         private boolean exoLookedUp;
         private Object exoInternal;
@@ -269,6 +270,7 @@ public final class IntroSkipBridge {
         private TextView pill;
         private boolean pillShown;
         private boolean armed;
+        private boolean manualArmed;
         private boolean okDownConsumed;
         private long lastOtherKeyAt;
         private Segment pillSegment;
@@ -386,9 +388,11 @@ public final class IntroSkipBridge {
             flowPos = -1;
             flowTicks = 0;
             okDownConsumed = false;
+            manualArmed = false;
             lastPollAt = 0;
             guardUntil = 0;
             guardTarget = 0;
+            guardSegment = null;
             landingCheckAt = 0;
             lastOtherKeyAt = 0;
             fragment = null;
@@ -505,8 +509,9 @@ public final class IntroSkipBridge {
             combine(now);
 
             long elapsed = lastPollAt == 0 ? POLL_MS : now - lastPollAt;
-            boolean jumped = lastPos >= 0
-                    && (pos < lastPos - 0.75 || pos > lastPos + elapsed / 1000.0 * 2.5 + 1.0);
+            boolean jumpedBack = lastPos >= 0 && pos < lastPos - 0.75;
+            boolean jumpedForward = lastPos >= 0 && pos > lastPos + elapsed / 1000.0 * 2.5 + 1.0;
+            boolean jumped = jumpedBack || jumpedForward;
             double moved = flowPos < 0 ? 0 : pos - flowPos;
             flowPos = pos;
             if (!playing || moved < 0 || moved >= 1.5) flowTicks = 0;
@@ -531,24 +536,38 @@ public final class IntroSkipBridge {
                     if (noticeUntil != 0 && now > noticeUntil) hidePill(true);
                     return;
                 }
+                if (guardSegment != null && pos < guardTarget - 2.0) {
+                    autoSkipped.remove(guardSegment.key());
+                    autoSkipped.remove(guardSegment.label);
+                    log("Auto-skip did not land (pos=" + fmt3(pos) + "s < target="
+                            + fmt3(guardTarget) + "s), re-arming " + guardSegment.label);
+                }
                 guardUntil = 0;
+                guardSegment = null;
                 jumped = false;
+                jumpedBack = false;
+                jumpedForward = false;
                 if (playing) flowTicks = 3;
             }
 
             Segment segment = segments.isEmpty() ? null : segmentAt(pos);
             if (segment != current) {
                 current = segment;
-                // Only a jump the USER made (left/right/rewind keys just before it) counts as a
-                // deliberate seek into the intro. Starting, resuming or the player's own
-                // repositioning inside the intro still auto-skips.
-                // A resume/start jump happens before ~3 s of real playback, whatever keys were pressed.
+                // A rewind into the segment (within 5 s of a seek key) or a forward jump deep
+                // (>= 8 s) into the segment within 1.5 s of a seek key is a deliberate user seek.
+                // Fast-forwarding up to the intro (or NEXT_SYNC snapping onto the intro keyframe)
+                // still auto-skips when the segment has not been skipped yet.
                 currentByJump = segment != null && jumped;
-                currentBySeek = (currentByJump && now - lastSeekKeyAt < 5000L && firstPlayingAt != 0
-                        && now - firstPlayingAt > 3000L) || (segment != null && inheritSeek);
+                double lag = segment == null ? 0.0 : pos - segment.startSeconds;
+                boolean warm = firstPlayingAt != 0 && now - firstPlayingAt > 3000L;
+                boolean deliberateSeek = segment != null && warm
+                        && ((jumpedBack && now - lastSeekKeyAt < 5000L)
+                        || (jumpedForward && now - lastSeekKeyAt < 1500L
+                        && (wasSkipped(segment) || lag >= 8.0)));
+                currentBySeek = deliberateSeek || (segment != null && inheritSeek);
                 if (segment != null) {
                     log("Segment entered " + segment.label + " pos=" + fmt(pos) + "s (start "
-                            + fmt(segment.startSeconds) + "s, lag " + fmt(pos - segment.startSeconds)
+                            + fmt(segment.startSeconds) + "s, lag " + fmt(lag)
                             + "s, " + (currentBySeek ? "user seek" : currentByJump
                             ? "player jump (resume/start)" : "playing") + ")");
                 }
@@ -560,7 +579,10 @@ public final class IntroSkipBridge {
             boolean autoPending = segment != null && !currentBySeek && autoWanted
                     && !wasSkipped(segment)
                     && (!currentByJump || jumpCount == null || jumpCount < 3);
-            if (autoPending && playing && flowTicks >= 3) {
+            boolean flowReady = flowTicks >= 3
+                    || (firstPlayingAt != 0 && now - firstPlayingAt > 1500L
+                    && (flowTicks >= 1 || (segment != null && pos - segment.startSeconds < 1.0)));
+            if (autoPending && playing && flowReady) {
                 if (currentByJump) jumpSkips.put(segment.key(), jumpCount == null ? 1 : jumpCount + 1);
                 skip(segment, true, pos, durationMs);
                 return;
@@ -663,6 +685,7 @@ public final class IntroSkipBridge {
             }
             guardUntil = SystemClock.uptimeMillis() + 2500L;
             guardTarget = target;
+            guardSegment = automatic ? segment : null;
             landingCheckAt = SystemClock.uptimeMillis() + 1000L;
             current = null;
             log((automatic ? "SKIP AUTO " : "SKIP MANUAL ") + segment.label + " " + fmt3(pos)
@@ -1067,26 +1090,10 @@ public final class IntroSkipBridge {
             pill.setGravity(Gravity.CENTER);
             pill.setSingleLine(true);
             pill.setPadding(dp(22), dp(11), dp(22), dp(11));
-            pill.setFocusable(true);
+            pill.setFocusable(false);
             pill.setFocusableInTouchMode(false);
-            pill.setClickable(true);
-            pill.setOnFocusChangeListener(new View.OnFocusChangeListener() {
-                @Override
-                public void onFocusChange(View v, boolean hasFocus) {
-                    if (!pillShown || (pillSegment == null && !nextPill)) return;
-                    armed = hasFocus || !controlsVisible();
-                    styleArmed(armed);
-                    log("Button focus=" + hasFocus + " armed=" + armed);
-                }
-            });
-            pill.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    if (!pillShown || (pillSegment == null && !nextPill)) return;
-                    log("Button clicked via View.OnClickListener");
-                    triggerPillAction();
-                }
-            });
+            pill.setClickable(false);
+            pill.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             pill.setVisibility(View.GONE);
             pill.setAlpha(0f);
             if (Build.VERSION.SDK_INT >= 21) pill.setElevation(dp(8));
@@ -1099,6 +1106,7 @@ public final class IntroSkipBridge {
 
         private void triggerPillAction() {
             okDownConsumed = false;
+            manualArmed = false;
             if (nextPill) {
                 hidePill(false);
                 playNextEpisode();
@@ -1136,19 +1144,11 @@ public final class IntroSkipBridge {
             pillSegment = segment;
             nextPill = false;
             noticeUntil = 0;
-            pill.setFocusable(true);
-            pill.setClickable(true);
-            boolean focused = pill.hasFocus();
-            armed = focused || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
+            armed = manualArmed || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
             pill.setText(segment.buttonText());
             styleArmed(armed);
             fadeIn();
-            // When shown right after a user seek/rewind while OSD is visible, request focus on the
-            // pill so a single OK press immediately activates it without fighting the OSD.
-            if (currentBySeek && controlsVisible() && !focused) {
-                pill.requestFocus();
-            }
-            log("Button shown: " + segment.buttonText() + (armed ? " (armed, OK = skip)" : " (disarmed, focus or wait OSD)"));
+            log("Button shown: " + segment.buttonText() + (armed ? " (armed, OK = skip)" : " (disarmed, Down = arm)"));
         }
 
         private void showNextEpisode() {
@@ -1158,9 +1158,7 @@ public final class IntroSkipBridge {
             pillSegment = null;
             nextPill = true;
             noticeUntil = 0;
-            pill.setFocusable(true);
-            pill.setClickable(true);
-            armed = pill.hasFocus() || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
+            armed = manualArmed || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
             pill.setText("Next episode (OK)");
             styleArmed(armed);
             fadeIn();
@@ -1319,13 +1317,16 @@ public final class IntroSkipBridge {
         }
 
         private void refreshArmed(long now) {
-            boolean focused = pill != null && pill.hasFocus();
+            if (!controlsVisible()) {
+                manualArmed = false;
+            }
             boolean next = (pillSegment != null || nextPill)
-                    && (focused || (!controlsVisible() && now - lastOtherKeyAt > 600L));
+                    && (manualArmed || (!controlsVisible() && now - lastOtherKeyAt > 600L));
             if (next != armed) {
                 armed = next;
                 styleArmed(armed);
-                log("Button " + (armed ? "armed (OK = skip)" : "disarmed (OK to player)") + " focus=" + focused);
+                log("Button " + (armed ? "armed (OK = skip)" : "disarmed (OK to player)")
+                        + " manualArmed=" + manualArmed);
             }
         }
 
@@ -1335,9 +1336,8 @@ public final class IntroSkipBridge {
             pillSegment = null;
             nextPill = false;
             armed = false;
+            manualArmed = false;
             okDownConsumed = false;
-            pill.setFocusable(false);
-            pill.setClickable(false);
             noticeUntil = SystemClock.uptimeMillis() + 2200L;
             pill.setText(text);
             styleArmed(false);
@@ -1356,15 +1356,11 @@ public final class IntroSkipBridge {
 
         private void hidePill(boolean animate) {
             armed = false;
+            manualArmed = false;
             okDownConsumed = false;
             pillSegment = null;
             nextPill = false;
             noticeUntil = 0;
-            if (pill != null) {
-                if (pill.hasFocus()) pill.clearFocus();
-                pill.setFocusable(false);
-                pill.setClickable(false);
-            }
             if (pill == null || !pillShown) return;
             pillShown = false;
             pill.animate().cancel();
@@ -1425,7 +1421,11 @@ public final class IntroSkipBridge {
             }
         }
 
-        /** True = key consumed. OK on an armed or focused Skip button triggers the skip. */
+        /**
+         * True = key consumed. When OSD is hidden, OK skips and all other keys pass through to
+         * Stremio (summoning OSD). When OSD is visible, pressing Down once arms the pill so OK
+         * skips, and any other key (Up/Left/Right/Back) disarms and passes through to Stremio.
+         */
         boolean onKey(KeyEvent event) {
             if (closed || event == null) return false;
             int keyCode = event.getKeyCode();
@@ -1435,33 +1435,30 @@ public final class IntroSkipBridge {
             }
             if (!pillShown || (pillSegment == null && !nextPill)) {
                 okDownConsumed = false;
+                manualArmed = false;
                 return false;
             }
             if (!isOkKey(keyCode)) {
                 okDownConsumed = false;
-                if (action == KeyEvent.ACTION_DOWN) {
-                    // Pressing Down or Up while the pill is shown (whether OSD is visible or hidden)
-                    // focuses and arms the pill so the user can always toggle and click it.
-                    if ((keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_UP)
-                            && pill != null && !pill.hasFocus()) {
-                        pill.requestFocus();
+                // Only intercept DPAD_DOWN when OSD is visible and the pill is not yet armed:
+                // this lets the user highlight the pill while OSD is up, without ever blocking
+                // DPAD_UP or trapping the user when OSD is hidden.
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && controlsVisible() && !manualArmed) {
+                    if (action == KeyEvent.ACTION_DOWN) {
+                        manualArmed = true;
                         armed = true;
                         styleArmed(true);
-                        log("Button focused via D-pad key=" + keyCode + " osd=" + controlsVisible());
-                        return true;
+                        log("Button armed via D-pad Down (osd=true)");
                     }
-                    // Pressing Left, Right, or Back while the pill is focused returns focus to the OSD.
-                    if (pill != null && pill.hasFocus()
-                            && (keyCode == KeyEvent.KEYCODE_DPAD_LEFT
-                            || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
-                            || keyCode == KeyEvent.KEYCODE_BACK)) {
-                        pill.clearFocus();
-                        armed = false;
-                        styleArmed(false);
-                        log("Button focus released to OSD key=" + keyCode);
+                    return true;
+                }
+                if (action == KeyEvent.ACTION_DOWN) {
+                    if (manualArmed) {
+                        manualArmed = false;
+                        log("Button disarmed back to OSD key=" + keyCode);
                     }
                     lastOtherKeyAt = SystemClock.uptimeMillis();
-                    if (armed && (pill == null || !pill.hasFocus())) {
+                    if (armed) {
                         armed = false;
                         styleArmed(false);
                     }
@@ -1471,13 +1468,13 @@ public final class IntroSkipBridge {
             if (action == KeyEvent.ACTION_DOWN) {
                 if (event.getRepeatCount() == 0) {
                     refreshArmed(SystemClock.uptimeMillis());
-                    okDownConsumed = armed || (pill != null && pill.hasFocus());
+                    okDownConsumed = armed;
                 }
                 return okDownConsumed;
             }
             if (action == KeyEvent.ACTION_UP) {
-                if (!okDownConsumed && !(pill != null && pill.hasFocus())) return false;
-                log("Button activated via OK key (armed=" + armed + ", focus=" + (pill != null && pill.hasFocus()) + ")");
+                if (!okDownConsumed) return false;
+                log("Button activated via OK key (armed=" + armed + ", manualArmed=" + manualArmed + ")");
                 triggerPillAction();
                 return true;
             }
@@ -2786,8 +2783,9 @@ public final class IntroSkipBridge {
      * (c) then TheIntroDB with that id + season/episode (+ duration_ms when known),
      * retrying a miss by tvdb_id and then tmdb_id (ids from a keyless Cinemeta
      * meta lookup, cached per show);
-     * (d) then IntroDB.app for missing segment types (and a real mid-episode OP
-     * replaces a 0.0s TheIntroDB OP).
+     * (d) then IntroDB.app for missing segment types (a real mid-episode OP
+     * replaces a 0.0s TheIntroDB OP and evicts overlapping mislabeled
+     * "credits"; an early "credits" with no OP anywhere is promoted).
      * Runs on a NETWORK thread, never on the main thread, and never blocks AniSkip
      * (separate thread) or chapter skipping.
      */
@@ -2856,15 +2854,24 @@ public final class IntroSkipBridge {
                     logger.log("Segment IntroDB: " + kind + " " + start + "s -> " + end + "s");
                 }
             }
-            // IntroDB.app fills missing segment types, and also replaces a 0.0s TheIntroDB OP
-            // when IntroDB.app has a real mid-episode OP (startSeconds > 5.0s).
+            // IntroDB.app fills missing segment types, replaces a 0.0s TheIntroDB OP when
+            // IntroDB.app has a mid-episode OP (startSeconds > 5.0s), and evicts any
+            // mislabeled TheIntroDB "credits" that overlaps IntroDB.app's OP.
             if (isImdbId(id) && season > 0 && episode > 0) {
                 for (Segment app : fetchIntroDbApp(id, season, episode, logger)) {
-                    if ("OP".equals(app.label) && app.startSeconds > 5.0) {
+                    if ("OP".equals(app.label)) {
                         for (int i = out.size() - 1; i >= 0; i--) {
-                            if ("OP".equals(out.get(i).label) && out.get(i).startSeconds <= 0.5) {
+                            Segment existing = out.get(i);
+                            if ("OP".equals(existing.label) && existing.startSeconds <= 0.5 && app.startSeconds > 5.0) {
                                 logger.log("IntroDB.app: replacing 0:00 IntroDB OP with mid-episode OP "
                                         + app.startSeconds + "s -> " + app.endSeconds + "s");
+                                out.remove(i);
+                            } else if ("credits".equals(existing.label)
+                                    && Math.min(existing.endSeconds, app.endSeconds)
+                                    - Math.max(existing.startSeconds, app.startSeconds) > 1.0) {
+                                logger.log("IntroDB.app: replacing overlapping IntroDB credits ("
+                                        + existing.startSeconds + "s -> " + existing.endSeconds
+                                        + "s) with OP " + app.startSeconds + "s -> " + app.endSeconds + "s");
                                 out.remove(i);
                             }
                         }
@@ -2880,6 +2887,21 @@ public final class IntroSkipBridge {
                     out.add(app);
                     logger.log("Segment IntroDB.app: " + app.label + " " + app.startSeconds
                             + "s -> " + app.endSeconds + "s");
+                }
+            }
+            // If TheIntroDB mislabeled an opening sequence in the first 35% of the episode as
+            // "credits" and neither source provided a separate OP, promote it to OP.
+            if (!hasSegmentType(out, "OP")) {
+                double maxIntroStart = episodeLength > 0 ? episodeLength * 0.35 : 300.0;
+                for (int i = 0; i < out.size(); i++) {
+                    Segment s = out.get(i);
+                    if ("credits".equals(s.label) && s.startSeconds < maxIntroStart
+                            && (episodeLength <= 0 || s.endSeconds < episodeLength * 0.5)) {
+                        out.set(i, new Segment(s.startSeconds, s.endSeconds, "OP", s.source));
+                        logger.log("IntroDB: promoted early credits (" + s.startSeconds + "s -> "
+                                + s.endSeconds + "s) to OP");
+                        break;
+                    }
                 }
             }
         } catch (Exception error) {
