@@ -75,6 +75,7 @@ public final class IntroSkipBridge {
     private static final String ANISKIP_URL = "https://api.aniskip.com/v2/skip-times/";
     private static final String INTRODB_URL = "https://api.theintrodb.org/v4/media";
     private static final String INTRODB_APP_URL = "https://api.introdb.app/segments";
+    private static final String SKIPDB_URL = "https://api.skipdb.tv/api/segments";
     private static final String CINEMETA_META_SERIES_URL = "https://v3-cinemeta.strem.io/meta/series/";
     private static final String CINEMETA_META_MOVIE_URL = "https://v3-cinemeta.strem.io/meta/movie/";
     // Network robustness: every skip-related HTTP call keeps the 5 s timeouts,
@@ -2940,6 +2941,23 @@ public final class IntroSkipBridge {
                             + "s -> " + app.endSeconds + "s");
                 }
             }
+            // SkipDB fills segment types none of the earlier sources has.
+            if (isImdbId(id) && season > 0 && episode > 0
+                    && !(hasSegmentType(out, "OP") && hasSegmentType(out, "recap")
+                    && hasSegmentType(out, "credits") && hasSegmentType(out, "preview"))) {
+                for (Segment s : fetchSkipDb(id, season, episode, episodeLength, logger)) {
+                    if (hasSegmentType(out, s.label)) {
+                        logger.log("SkipDB: skipped " + s.label + ", already have it");
+                        continue;
+                    }
+                    if (overlaps(out, s.startSeconds, s.endSeconds)) {
+                        logger.log("SkipDB: duplicate skipped (" + s.label + " " + s.startSeconds + "s)");
+                        continue;
+                    }
+                    out.add(s);
+                    logger.log("Segment SkipDB: " + s.label + " " + s.startSeconds + "s -> " + s.endSeconds + "s");
+                }
+            }
             // If TheIntroDB mislabeled an opening sequence in the first 35% of the episode as
             // "credits" and neither source provided a separate OP, promote it to OP.
             if (!hasSegmentType(out, "OP")) {
@@ -3154,6 +3172,50 @@ public final class IntroSkipBridge {
             out.add(new Segment(start, end, label, "IntroDB.app"));
         } catch (Exception error) {
             logger.log("ERROR IntroDB.app (" + key + "): " + error.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * SkipDB (skipdb.tv) final fallback: open data, IMDb-keyed, anonymous reads.
+     * GET /api/segments?imdb_id=&season=&episode[&duration=] answers
+     * {"segments": {"intro"|"recap"|"outro"|"preview": {"start_ms","end_ms","match",...} or null}}.
+     * "out-of-range" matches carry SkipDB's own uncertainty flag and are skipped.
+     */
+    private static List<Segment> fetchSkipDb(String imdbId, int season, int episode, long episodeLengthSec,
+                                             DebugLogger logger) {
+        List<Segment> out = new ArrayList<Segment>();
+        try {
+            String url = SKIPDB_URL + "?imdb_id=" + imdbId + "&season=" + season + "&episode=" + episode
+                    + (episodeLengthSec > 0 ? "&duration=" + episodeLengthSec : "");
+            JSONObject response = new JSONObject(request("GET", url, null, logger));
+            JSONObject segments = response.optJSONObject("segments");
+            if (segments == null) return out;
+            addSkipDbSegment(out, segments, "intro", "OP", logger);
+            addSkipDbSegment(out, segments, "recap", "recap", logger);
+            addSkipDbSegment(out, segments, "outro", "credits", logger);
+            addSkipDbSegment(out, segments, "preview", "preview", logger);
+        } catch (Exception error) {
+            logger.log("ERROR SkipDB: " + error.getClass().getSimpleName() + ": " + safe(error.getMessage()));
+        }
+        return out;
+    }
+
+    private static void addSkipDbSegment(List<Segment> out, JSONObject segments, String key, String label,
+                                         DebugLogger logger) {
+        try {
+            if (hasSegmentType(out, label)) return;
+            JSONObject item = segments.optJSONObject(key);
+            if (item == null) return;
+            if ("out-of-range".equals(item.optString("match", ""))) {
+                logger.log("SkipDB: skipped " + key + " (out-of-range match)");
+                return;
+            }
+            double start = item.isNull("start_ms") ? -1.0 : item.optLong("start_ms", -1L) / 1000.0;
+            double end = item.isNull("end_ms") ? -1.0 : item.optLong("end_ms", -1L) / 1000.0;
+            if (start < 0.0 || end <= start || end - start > 600) return;
+            out.add(new Segment(start, end, label, "SkipDB"));
+        } catch (Exception error) {
+            logger.log("ERROR SkipDB (" + key + "): " + error.getClass().getSimpleName());
         }
     }
 

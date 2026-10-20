@@ -81,6 +81,7 @@ public final class IntroSkip implements Runnable {
     private static final String ANISKIP_URL = "https://api.aniskip.com/v2/skip-times/";
     private static final String INTRODB_URL = "https://api.theintrodb.org/v4/media";
     private static final String INTRODB_APP_URL = "https://api.introdb.app/segments";
+    private static final String SKIPDB_URL = "https://api.skipdb.tv/api/segments";
     private static final String CINEMETA_META_SERIES_URL = "https://v3-cinemeta.strem.io/meta/series/";
     // Network robustness: every skip-related HTTP call keeps the 5 s timeouts,
     // retries 429/5xx up to 3 times (Retry-After honoured, each wait capped at
@@ -1779,6 +1780,17 @@ public final class IntroSkip implements Runnable {
                     out.add(app);
                 }
             }
+            // SkipDB fills only the segment types neither source has.
+            if (isImdbId(id) && info.season > 0 && info.episode > 0
+                    && !(hasSegType(out, "Intro") && hasSegType(out, "Recap") && hasSegType(out, "Credits"))) {
+                for (Seg s : fetchSkipDb(id, info.season, info.episode, durationMs)) {
+                    if (hasSegType(out, s.name)) {
+                        continue;
+                    }
+                    if (overlapsMs(out, s.start, s.end)) continue;
+                    out.add(s);
+                }
+            }
             Collections.sort(out, new Comparator<Seg>() {
                 @Override
                 public int compare(Seg a, Seg b) {
@@ -1981,6 +1993,44 @@ public final class IntroSkip implements Runnable {
             Log.i(TAG, "Segment IntroDB.app: " + key + " " + start + "-" + end + "ms");
         } catch (Throwable error) {
             Log.w(TAG, "IntroDB.app (" + key + ") failed: " + error);
+        }
+    }
+
+    /**
+     * SkipDB (skipdb.tv) final fallback: open data, IMDb-keyed, anonymous reads.
+     * Missing types only; "out-of-range" matches carry SkipDB's own uncertainty flag.
+     */
+    private static List<Seg> fetchSkipDb(String imdbId, int season, int episode, int durationMs) {
+        List<Seg> out = new ArrayList<Seg>();
+        try {
+            String url = SKIPDB_URL + "?imdb_id=" + imdbId + "&season=" + season + "&episode=" + episode
+                    + (durationMs > 0 ? "&duration=" + (durationMs / 1000) : "");
+            JSONObject response = new JSONObject(http("GET", url, null, null));
+            JSONObject segments = response.optJSONObject("segments");
+            if (segments == null) return out;
+            addSkipDbSegment(out, segments, "intro", "Intro");
+            addSkipDbSegment(out, segments, "recap", "Recap");
+            addSkipDbSegment(out, segments, "outro", "Credits");
+        } catch (Throwable error) {
+            Log.w(TAG, "SkipDB lookup failed: " + error);
+        }
+        return out;
+    }
+
+    private static void addSkipDbSegment(List<Seg> out, JSONObject segments, String key, String name) {
+        try {
+            if (hasSegType(out, name)) return;
+            JSONObject item = segments.optJSONObject(key);
+            if (item == null) return;
+            if ("out-of-range".equals(item.optString("match", ""))) return;
+            if (item.isNull("start_ms") || item.isNull("end_ms")) return;
+            int start = item.optInt("start_ms", -1);
+            int end = item.optInt("end_ms", -1);
+            if (start < 0 || end <= start || end - start > 600000) return;
+            out.add(new Seg(start, end, name, "skipdb"));
+            Log.i(TAG, "Segment SkipDB: " + key + " " + start + "-" + end + "ms");
+        } catch (Throwable error) {
+            Log.w(TAG, "SkipDB (" + key + ") failed: " + error);
         }
     }
 
