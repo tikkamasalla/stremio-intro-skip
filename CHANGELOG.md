@@ -1,3 +1,9 @@
+## [1.2.2](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.1...v1.2.2) (2026-10-20)
+
+### 🐛 Bug Fixes
+
+* tag-safe chevron handling and fullwidth paren support in SDH cleaner ([2c076c7](https://github.com/tikkamasalla/stremio-morphe-patches/commit/2c076c74ed9fbaf3bf5b7a3b9d9cf48e60486f24))
+
 ## [1.2.1](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.0...v1.2.1) (2026-10-20)
 
 ### 🐛 Bug Fixes

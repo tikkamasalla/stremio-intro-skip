@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-10-20T05:42:07",
-  "description": "## [1.2.1](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.0...v1.2.1) (2026-10-20)\n\n### 🐛 Bug Fixes\n\n* strip CEA-608 chevrons and fullwidth parens in SDH cleaner ([f61a7d2](https://github.com/tikkamasalla/stremio-morphe-patches/commit/f61a7d26a4bc0876d554c6c32c69ce1c25396728))",
-  "download_url": "https://github.com/tikkamasalla/stremio-morphe-patches/releases/download/v1.2.1/patches-1.2.1.mpp",
+  "created_at": "2026-10-20T05:53:27",
+  "description": "## [1.2.2](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.1...v1.2.2) (2026-10-20)\n\n### 🐛 Bug Fixes\n\n* tag-safe chevron handling and fullwidth paren support in SDH cleaner ([2c076c7](https://github.com/tikkamasalla/stremio-morphe-patches/commit/2c076c74ed9fbaf3bf5b7a3b9d9cf48e60486f24))",
+  "download_url": "https://github.com/tikkamasalla/stremio-morphe-patches/releases/download/v1.2.2/patches-1.2.2.mpp",
   "signature_download_url": "",
-  "version": "1.2.1"
+  "version": "1.2.2"
 }
