@@ -1,3 +1,9 @@
+## [1.2.6](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.5...v1.2.6) (2026-10-20)
+
+### 🐛 Bug Fixes
+
+* rank 2160p singles over packs, kill phantom intros, focusable skip button ([2aad65a](https://github.com/tikkamasalla/stremio-morphe-patches/commit/2aad65a3a9477d7d6258a1304504d6d35ce1ff2c))
+
 ## [1.2.5](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.4...v1.2.5) (2026-10-20)
 
 ### 🐛 Bug Fixes
