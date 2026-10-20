@@ -672,7 +672,11 @@ public final class ExternalProgress {
                 new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
                     @Override
                     public void run() {
-                        stopInternalPlayer(fragment);
+                        // Only while the binge handoff is still live: on a fast external
+                        // failure Stremio may already have fallen back to its own player.
+                        if (externalSessionOpen || System.currentTimeMillis() < bingeInFlightUntil) {
+                            stopInternalPlayer(fragment);
+                        }
                     }
                 }, 300L);
                 Log.i(TAG, "binge: openInExternalPlayer");
