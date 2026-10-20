@@ -534,6 +534,13 @@ public final class StreamAutoPick {
     /** Only streams the player can open directly: a URL or a torrent. Web links, YouTube and frames open other apps. */
     private static boolean isPlayable(Object stream) {
         try {
+            if (call(stream, "getExternalUrl") != null || call(stream, "getYouTube") != null) {
+                return false;
+            }
+            String name = str(call(stream, "getName"));
+            if (name.contains("⚠")) {
+                return false; // addon warning/promo card
+            }
             return call(stream, "getUrl") != null || call(stream, "getTorrent") != null;
         } catch (Throwable ignored) {
             return false;
