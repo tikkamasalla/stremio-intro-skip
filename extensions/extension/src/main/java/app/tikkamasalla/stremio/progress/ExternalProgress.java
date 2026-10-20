@@ -413,7 +413,6 @@ public final class ExternalProgress {
     private static final String KEY_ARMED_AT = "external_binge_armed_at";
     private static final long BINGE_TTL_MS = 60000L;
 
-    private static final long BINGE_TTL_MS = 60000L;
     private static final long BINGE_INFLIGHT_MS = 15000L;
 
     public static Object parse(int resultCode, Intent data) {
