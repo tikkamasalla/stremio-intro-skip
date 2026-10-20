@@ -1,3 +1,16 @@
+## [1.3.0](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.6...v1.3.0) (2026-10-20)
+
+### 🐛 Bug Fixes
+
+* Dexter credits-promotion, seek-aware auto-skip, OSD-safe button arming ([fe80b59](https://github.com/tikkamasalla/stremio-morphe-patches/commit/fe80b59dd24883176c45ea98952a1e923242c11c))
+* never auto-pick addon warning cards or external links ([917bbec](https://github.com/tikkamasalla/stremio-morphe-patches/commit/917bbec45455a8fc1379981541a9555916c6d6cd))
+* re-arm on rewind, credits-promotion, deferred startup lookups ([24c4d40](https://github.com/tikkamasalla/stremio-morphe-patches/commit/24c4d40f069b2e3107526b72e04487922e1f6343))
+* romaji aliases, 0s-recap guard, duration refresh, OSD-proof skip button ([a38ac78](https://github.com/tikkamasalla/stremio-morphe-patches/commit/a38ac7893f7d72e0d8bc4189ec899ee31aa5102b))
+
+### ✨ New Features
+
+* romaji aliases, intro-data guards, OSD-safe button, warning-card guard ([9b63eaf](https://github.com/tikkamasalla/stremio-morphe-patches/commit/9b63eafd637bd8d6806c86f51de4cec04ae76a9d))
+
 ## [1.2.6](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.5...v1.2.6) (2026-10-20)
 
 ### 🐛 Bug Fixes
