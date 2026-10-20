@@ -1,3 +1,9 @@
+## [1.2.4](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.3...v1.2.4) (2026-10-20)
+
+### 🐛 Bug Fixes
+
+* only delayed-stop internal player while binge handoff live ([3a4cfc0](https://github.com/tikkamasalla/stremio-morphe-patches/commit/3a4cfc04ebcf48abb3715e60106da30d5961598f))
+
 ## [1.2.3](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.2...v1.2.3) (2026-10-20)
 
 ### 🐛 Bug Fixes
