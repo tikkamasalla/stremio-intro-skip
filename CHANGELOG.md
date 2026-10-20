@@ -1,3 +1,10 @@
+## [1.2.3](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.2...v1.2.3) (2026-10-20)
+
+### 🐛 Bug Fixes
+
+* drop duplicated binge TTL constant ([563ef49](https://github.com/tikkamasalla/stremio-morphe-patches/commit/563ef49d34619caa92b9c94848a87f5d3ab86805))
+* stop internal player on external binge to kill double audio ([50540d6](https://github.com/tikkamasalla/stremio-morphe-patches/commit/50540d671a0477f3a27592ba1bd674f545c5a147))
+
 ## [1.2.2](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.1...v1.2.2) (2026-10-20)
 
 ### 🐛 Bug Fixes

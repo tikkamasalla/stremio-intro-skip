@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-10-20T05:53:27",
-  "description": "## [1.2.2](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.1...v1.2.2) (2026-10-20)\n\n### 🐛 Bug Fixes\n\n* tag-safe chevron handling and fullwidth paren support in SDH cleaner ([2c076c7](https://github.com/tikkamasalla/stremio-morphe-patches/commit/2c076c74ed9fbaf3bf5b7a3b9d9cf48e60486f24))",
-  "download_url": "https://github.com/tikkamasalla/stremio-morphe-patches/releases/download/v1.2.2/patches-1.2.2.mpp",
+  "created_at": "2026-10-20T14:19:45",
+  "description": "## [1.2.3](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.2...v1.2.3) (2026-10-20)\n\n### 🐛 Bug Fixes\n\n* drop duplicated binge TTL constant ([563ef49](https://github.com/tikkamasalla/stremio-morphe-patches/commit/563ef49d34619caa92b9c94848a87f5d3ab86805))\n* stop internal player on external binge to kill double audio ([50540d6](https://github.com/tikkamasalla/stremio-morphe-patches/commit/50540d671a0477f3a27592ba1bd674f545c5a147))",
+  "download_url": "https://github.com/tikkamasalla/stremio-morphe-patches/releases/download/v1.2.3/patches-1.2.3.mpp",
   "signature_download_url": "",
-  "version": "1.2.2"
+  "version": "1.2.3"
 }
