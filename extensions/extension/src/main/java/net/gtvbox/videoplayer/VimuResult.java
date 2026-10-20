@@ -29,8 +29,23 @@ public final class VimuResult {
     /** When Vimu itself last opened one of its own screens from the player (its preferences). */
     private static volatile long ownScreenAt;
     private static final long OWN_SCREEN_MS = 3000L;
+    private static final java.util.WeakHashMap<Object, Boolean> EXITED_FRAGMENTS =
+            new java.util.WeakHashMap<>();
 
     private VimuResult() {
+    }
+
+    private static void stopVimuPlayer(PlayerFragment f) {
+        try {
+            if (f == null) return;
+            e player = PlayerFragment.G0(f);
+            if (player == null) return;
+            try {
+                player.getClass().getMethod("pause").invoke(player);
+            } catch (Throwable ignored) {
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     /**
@@ -39,7 +54,16 @@ public final class VimuResult {
      */
     public static void track(Object fragment) {
         try {
-            tracked = new WeakReference<>((PlayerFragment) fragment);
+            PlayerFragment next = (PlayerFragment) fragment;
+            PlayerFragment prev = tracked == null ? null : tracked.get();
+            if (prev != null && prev != next) {
+                stopVimuPlayer(prev);
+                Activity prevAct = prev.getActivity();
+                if (prevAct != null && !prevAct.isFinishing()) {
+                    prevAct.finish();
+                }
+            }
+            tracked = new WeakReference<>(next);
             logged = false;
             if (!ticking) {
                 ticking = true;
@@ -145,6 +169,13 @@ public final class VimuResult {
      */
     public static int fill(Object fragment, int code, Intent out) {
         try {
+            boolean dupExit;
+            synchronized (EXITED_FRAGMENTS) {
+                dupExit = EXITED_FRAGMENTS.put(fragment, Boolean.TRUE) != null;
+            }
+            if (fragment instanceof PlayerFragment) {
+                stopVimuPlayer((PlayerFragment) fragment);
+            }
             int position = readInt(fragment, "J0");
             int duration = readInt(fragment, "K0");
             if (duration > 0) {
@@ -154,7 +185,11 @@ public final class VimuResult {
                 out.putExtra("position", position);
                 out.putExtra("duration", duration);
             }
-            out.putExtra("end_by", code == 1 ? "playback_completion" : "user");
+            String endBy = code == 1 ? "playback_completion" : "user";
+            out.putExtra("end_by", endBy);
+            Log.i("BingeDbg", "vimuExit frag=" + System.identityHashCode(fragment)
+                    + " code=" + code + " endBy=" + endBy + " pos=" + position
+                    + "/" + duration + " dupExit=" + dupExit);
             Log.i(TAG, "result code=" + code + " position=" + position + " duration=" + duration);
             return code == 0 ? RESULT_OK : code;
         } catch (Throwable error) {

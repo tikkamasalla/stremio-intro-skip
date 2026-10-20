@@ -41,9 +41,16 @@ val bingeExternalPatch = bytecodePatch(
 
     execute {
         try {
-            BingePlaybackFingerprint.method.addInstructions(
+            BingePlaybackFingerprint.method.addInstructionsWithLabels(
                 0,
-                "invoke-static {p0, p1}, $EXTENSION->maybeBinge(Ljava/lang/Object;Ljava/lang/Object;)V",
+                """
+                    invoke-static {p0, p1}, $EXTENSION->maybeBinge(Ljava/lang/Object;Ljava/lang/Object;)Z
+                    move-result v0
+                    if-nez v0, :binge_handled
+                    return-void
+                    :binge_handled
+                    nop
+                """.trimIndent(),
             )
         } catch (_: Exception) {
             // Internal playback keeps working; binge stays off on this build.

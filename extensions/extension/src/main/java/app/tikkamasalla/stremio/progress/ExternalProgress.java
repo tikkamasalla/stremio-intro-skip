@@ -220,6 +220,8 @@ public final class ExternalProgress {
                 return; // the YouTube branch, not a player launch
             }
             launchedAt = System.currentTimeMillis();
+            externalSessionOpen = true;
+            stopInternalPlayer(lastBingeFragment == null ? null : lastBingeFragment.get());
             ensureExplicitPlayer(intent);
             applyHandoff(intent);
             int position = intent.getIntExtra("startfrom", 0);
@@ -399,15 +401,28 @@ public final class ExternalProgress {
      */
     private static volatile long lastDuration;
     private static volatile long launchedAt;
+    private static volatile boolean externalSessionOpen;
+    private static volatile long bingeInFlightUntil;
+    private static volatile java.lang.ref.WeakReference<Object> lastBingeFragment;
+    private static final java.util.concurrent.atomic.AtomicBoolean BINGE_ARMED =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static final java.util.concurrent.atomic.AtomicInteger BINGE_SEQ =
+            new java.util.concurrent.atomic.AtomicInteger(0);
     private static final long MIN_OPEN_MS = 60000L;
     private static final double FULL_RATIO = 0.9;
     private static final String KEY_ARMED_AT = "external_binge_armed_at";
     private static final long BINGE_TTL_MS = 60000L;
 
+    private static final long BINGE_TTL_MS = 60000L;
+    private static final long BINGE_INFLIGHT_MS = 15000L;
+
     public static Object parse(int resultCode, Intent data) {
         keepAlive(false);
+        externalSessionOpen = false;
+        bingeInFlightUntil = 0L;
         try {
             if (data == null) {
+                launchedAt = 0L;
                 Log.i(TAG, "result code=" + resultCode + " without data");
                 return null;
             }
@@ -416,23 +431,27 @@ public final class ExternalProgress {
             long position = readLong(extras, "extra_position", "position");
             long duration = readLong(extras, "extra_duration", "duration");
             String endBy = extras != null ? extras.getString("end_by") : null;
-            long openMs = launchedAt > 0L ? System.currentTimeMillis() - launchedAt : 0L;
+            long launchStamp = launchedAt;
+            long openMs = launchStamp > 0L ? System.currentTimeMillis() - launchStamp : 0L;
             launchedAt = 0L;
             // Real completion only: the player reported the end with a known duration, or it was
-            // open for a minute and reached 90% of the duration. A quick error return is never one.
+            // open for a minute and reached 90% of the duration. A quick error return or a duplicate
+            // result after launchedAt was already consumed (launchStamp == 0L) is never one.
             boolean reportedEnd = "playback_completion".equals(endBy)
                     || ("net.gtvbox.videoplayer.result".equals(action) && resultCode == 1);
             boolean completed = false;
-            if (reportedEnd) {
-                completed = duration > 0L || (openMs >= MIN_OPEN_MS && lastDuration > 0L);
-            } else if (duration > 0L && position >= (long) (duration * FULL_RATIO)) {
-                completed = openMs >= MIN_OPEN_MS;
-            } else if (duration == 0L && openMs >= MIN_OPEN_MS && lastDuration > 0L
-                    && ("org.videolan.vlc.player.result".equals(action)
-                    || ("is.xyz.mpv.MPVActivity.result".equals(action)
-                    && resultCode == Activity_RESULT_OK && position == 0L))) {
-                // VLC and mpv report no position at the end of a file.
-                completed = true;
+            if (launchStamp > 0L) {
+                if (reportedEnd) {
+                    completed = duration > 0L || (openMs >= MIN_OPEN_MS && lastDuration > 0L);
+                } else if (duration > 0L && position >= (long) (duration * FULL_RATIO)) {
+                    completed = openMs >= MIN_OPEN_MS;
+                } else if (duration == 0L && openMs >= MIN_OPEN_MS && lastDuration > 0L
+                        && ("org.videolan.vlc.player.result".equals(action)
+                        || ("is.xyz.mpv.MPVActivity.result".equals(action)
+                        && resultCode == Activity_RESULT_OK && position == 0L))) {
+                    // VLC and mpv report no position at the end of a file.
+                    completed = true;
+                }
             }
             if (completed) {
                 // Stremio's core only gets position and duration: report a full position at the end.
@@ -560,6 +579,7 @@ public final class ExternalProgress {
     private static void armBinge() {
         try {
             if (!isBingeEnabled() || "movie".equals(capMediaType)) return;
+            BINGE_ARMED.set(true);
             Context context = appContext;
             if (context == null) return;
             context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
@@ -597,37 +617,101 @@ public final class ExternalProgress {
      * Hook at the start of PlayerFragment.startStreamPlayback. When the previous
      * external playback finished, the next episode is already loading here with its
      * best stream; relaunch it in the external player instead of playing inside.
-     * Movies never binge: a bare videoId without season and episode clears the flag.
-     * Fail soft: any problem leaves the internal playback running.
+     * Returns true when external binge handled (or suppressed a duplicate internal
+     * start during the launch) so that PlayerFragment.startStreamPlayback returns
+     * immediately without starting ExoPlayer. Movies never binge: a bare videoId
+     * without season and episode clears the flag.
+     * Fail soft: any problem returns false so internal playback continues.
      */
-    public static void maybeBinge(Object fragment, Object stream) {
+    public static boolean maybeBinge(Object fragment, Object stream) {
         try {
-            playbackStartedAt = System.currentTimeMillis();
+            long now = System.currentTimeMillis();
+            playbackStartedAt = now;
+            int seq = BINGE_SEQ.incrementAndGet();
             Context context = appContext;
-            if (context == null || fragment == null) return;
+            if (context == null || fragment == null) return false;
             android.content.SharedPreferences prefs =
                     context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE);
-            if (!prefs.getBoolean(KEY_PENDING, false)) return;
-            long armedAt = prefs.getLong(KEY_ARMED_AT, 0L);
-            prefs.edit().putBoolean(KEY_PENDING, false).apply();
-            if (System.currentTimeMillis() - armedAt > BINGE_TTL_MS) {
-                Log.i(TAG, "binge flag expired");
-                return;
+            boolean inFlight = now < bingeInFlightUntil || externalSessionOpen;
+            boolean prefPending = prefs.getBoolean(KEY_PENDING, false);
+            boolean memPending = BINGE_ARMED.getAndSet(false);
+            if (prefPending) {
+                prefs.edit().putBoolean(KEY_PENDING, false).apply();
             }
-            if (!prefs.getBoolean(KEY_BINGE, true)) return;
+            boolean pending = memPending || prefPending;
+
+            // Duplicate startStreamPlayback while the binge external launch is already in-flight/open:
+            // suppress internal ExoPlayer startup without launching a second external player.
+            if (!pending && inFlight) {
+                stopInternalPlayer(fragment);
+                Log.i("BingeDbg", "startStreamPlayback seq=" + seq + " pending=false inFlight=true"
+                        + " internalPlaying=" + isInternalPlaying(fragment) + " action=SUPPRESS_DUP_INTERNAL");
+                return true;
+            }
+            if (!pending) {
+                Log.i("BingeDbg", "startStreamPlayback seq=" + seq + " pending=false inFlight=false"
+                        + " internalPlaying=" + isInternalPlaying(fragment) + " action=PASS_INTERNAL");
+                return false;
+            }
+            long armedAt = prefs.getLong(KEY_ARMED_AT, 0L);
+            if (now - armedAt > BINGE_TTL_MS) {
+                Log.i(TAG, "binge flag expired");
+                return false;
+            }
+            if (!prefs.getBoolean(KEY_BINGE, true)) return false;
             if (isMovieFragment(fragment)) {
                 Log.i(TAG, "binge skipped: movie");
-                return;
+                return false;
             }
             try {
+                lastBingeFragment = new java.lang.ref.WeakReference<>(fragment);
+                bingeInFlightUntil = now + BINGE_INFLIGHT_MS;
+                stopInternalPlayer(fragment);
                 fragment.getClass().getMethod("openInExternalPlayer", Long.class)
                         .invoke(fragment, new Object[]{null});
+                stopInternalPlayer(fragment);
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        stopInternalPlayer(fragment);
+                    }
+                }, 300L);
                 Log.i(TAG, "binge: openInExternalPlayer");
+                Log.i("BingeDbg", "startStreamPlayback seq=" + seq + " pending=true inFlight=" + inFlight
+                        + " internalPlaying=" + isInternalPlaying(fragment) + " action=LAUNCH_EXT");
+                return true;
             } catch (Throwable error) {
+                bingeInFlightUntil = 0L;
                 Log.w(TAG, "binge", error);
+                return false;
             }
         } catch (Throwable ignored) {
             // Internal playback continues.
+            return false;
+        }
+    }
+
+    private static void stopInternalPlayer(Object fragment) {
+        try {
+            if (fragment == null) return;
+            Object playerObject = field(fragment, "player");
+            if (playerObject instanceof Player) {
+                Player player = (Player) playerObject;
+                player.setPlayWhenReady(false);
+                player.pause();
+                player.stop();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static boolean isInternalPlaying(Object fragment) {
+        try {
+            if (fragment == null) return false;
+            Object playerObject = field(fragment, "player");
+            return playerObject instanceof Player && ((Player) playerObject).isPlaying();
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
