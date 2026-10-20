@@ -1,3 +1,9 @@
+## [1.2.1](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.2.0...v1.2.1) (2026-10-20)
+
+### 🐛 Bug Fixes
+
+* strip CEA-608 chevrons and fullwidth parens in SDH cleaner ([f61a7d2](https://github.com/tikkamasalla/stremio-morphe-patches/commit/f61a7d26a4bc0876d554c6c32c69ce1c25396728))
+
 ## [1.2.0](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.1.0...v1.2.0) (2026-10-19)
 
 ### 🐛 Bug Fixes
