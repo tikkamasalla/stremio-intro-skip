@@ -221,6 +221,8 @@ public final class IntroSkipBridge {
         // media resolution
         private String identity;
         private String loadedKey;
+        private long fetchedLength;
+        private String[] cachedVideoId;
         private String lastSnapshot;
         private MediaInfo pendingInfo;
         private long readySince;
@@ -246,6 +248,7 @@ public final class IntroSkipBridge {
         private double lastPos = -1;
         private double flowPos = -1;
         private int flowTicks;
+        private int steadyTicks;
         private long lastPollAt;
         private Segment current;
         private boolean currentBySeek;
@@ -257,6 +260,7 @@ public final class IntroSkipBridge {
         private boolean inheritSeek;
         private long guardUntil;
         private double guardTarget;
+        private Segment guardSegment;
         private long landingCheckAt;
         private boolean exoLookedUp;
         private Object exoInternal;
@@ -268,6 +272,7 @@ public final class IntroSkipBridge {
         private TextView pill;
         private boolean pillShown;
         private boolean armed;
+        private boolean manualArmed;
         private boolean okDownConsumed;
         private long lastOtherKeyAt;
         private Segment pillSegment;
@@ -337,7 +342,6 @@ public final class IntroSkipBridge {
                 showDebugDialog();
             }
             if (!wasRunning) {
-                installKeys();
                 MAIN.post(tick);
             }
         }
@@ -350,6 +354,8 @@ public final class IntroSkipBridge {
         private void resetMedia() {
             identity = null;
             loadedKey = null;
+            fetchedLength = -1;
+            cachedVideoId = null;
             lastSnapshot = null;
             pendingInfo = null;
             readySince = 0;
@@ -383,10 +389,13 @@ public final class IntroSkipBridge {
             lastPos = -1;
             flowPos = -1;
             flowTicks = 0;
+            steadyTicks = 0;
             okDownConsumed = false;
+            manualArmed = false;
             lastPollAt = 0;
             guardUntil = 0;
             guardTarget = 0;
+            guardSegment = null;
             landingCheckAt = 0;
             lastOtherKeyAt = 0;
             fragment = null;
@@ -503,12 +512,28 @@ public final class IntroSkipBridge {
             combine(now);
 
             long elapsed = lastPollAt == 0 ? POLL_MS : now - lastPollAt;
-            boolean jumped = lastPos >= 0
-                    && (pos < lastPos - 0.75 || pos > lastPos + elapsed / 1000.0 * 2.5 + 1.0);
+            boolean jumpedBack = lastPos >= 0 && pos < lastPos - 0.75;
+            boolean jumpedForward = lastPos >= 0 && pos > lastPos + elapsed / 1000.0 * 2.5 + 1.0;
+            boolean jumped = jumpedBack || jumpedForward;
             double moved = flowPos < 0 ? 0 : pos - flowPos;
             flowPos = pos;
-            if (!playing || moved < 0 || moved >= 1.5) flowTicks = 0;
-            else if (moved > 0) flowTicks++;
+            if (!playing || moved < 0 || moved >= 1.5) {
+                flowTicks = 0;
+            } else if (moved > 0) {
+                flowTicks++;
+                if (steadyTicks < 10) steadyTicks++;
+            }
+            // If the user rewinds to before a previously skipped segment (> 2 s before its start),
+            // re-arm auto-skip for that segment so playing naturally into it skips again.
+            if (jumpedBack && !autoSkipped.isEmpty()) {
+                for (Segment s : segments) {
+                    if (pos < s.startSeconds - 2.0 && wasSkipped(s)) {
+                        autoSkipped.remove(s.key());
+                        autoSkipped.remove(s.label);
+                        log("Re-armed " + s.label + " after rewind before start (pos=" + fmt(pos) + "s)");
+                    }
+                }
+            }
             lastPos = pos;
             lastPollAt = now;
             if (playing && firstPlayingAt == 0) firstPlayingAt = now;
@@ -529,24 +554,38 @@ public final class IntroSkipBridge {
                     if (noticeUntil != 0 && now > noticeUntil) hidePill(true);
                     return;
                 }
+                if (guardSegment != null && pos < guardTarget - 2.0) {
+                    autoSkipped.remove(guardSegment.key());
+                    autoSkipped.remove(guardSegment.label);
+                    log("Auto-skip did not land (pos=" + fmt3(pos) + "s < target="
+                            + fmt3(guardTarget) + "s), re-arming " + guardSegment.label);
+                }
                 guardUntil = 0;
+                guardSegment = null;
                 jumped = false;
+                jumpedBack = false;
+                jumpedForward = false;
                 if (playing) flowTicks = 3;
             }
 
             Segment segment = segments.isEmpty() ? null : segmentAt(pos);
             if (segment != current) {
                 current = segment;
-                // Only a jump the USER made (left/right/rewind keys just before it) counts as a
-                // deliberate seek into the intro. Starting, resuming or the player's own
-                // repositioning inside the intro still auto-skips.
-                // A resume/start jump happens before ~3 s of real playback, whatever keys were pressed.
+                // A rewind into the segment (within 3 s of a seek key) or a forward jump deep
+                // (>= 15 s) into the segment within 1.2 s of a seek key is a deliberate user seek.
+                // Fast-forwarding up to the intro (even when NEXT_SYNC snaps several seconds inside)
+                // still auto-skips when the segment has not been skipped yet.
                 currentByJump = segment != null && jumped;
-                currentBySeek = (currentByJump && now - lastSeekKeyAt < 5000L && firstPlayingAt != 0
-                        && now - firstPlayingAt > 3000L) || (segment != null && inheritSeek);
+                double lag = segment == null ? 0.0 : pos - segment.startSeconds;
+                boolean warm = firstPlayingAt != 0 && now - firstPlayingAt > 3000L;
+                boolean deliberateSeek = segment != null && warm
+                        && ((jumpedBack && now - lastSeekKeyAt < 3000L)
+                        || (jumpedForward && now - lastSeekKeyAt < 1200L
+                        && (wasSkipped(segment) || lag >= 15.0)));
+                currentBySeek = deliberateSeek || (segment != null && inheritSeek);
                 if (segment != null) {
                     log("Segment entered " + segment.label + " pos=" + fmt(pos) + "s (start "
-                            + fmt(segment.startSeconds) + "s, lag " + fmt(pos - segment.startSeconds)
+                            + fmt(segment.startSeconds) + "s, lag " + fmt(lag)
                             + "s, " + (currentBySeek ? "user seek" : currentByJump
                             ? "player jump (resume/start)" : "playing") + ")");
                 }
@@ -558,7 +597,11 @@ public final class IntroSkipBridge {
             boolean autoPending = segment != null && !currentBySeek && autoWanted
                     && !wasSkipped(segment)
                     && (!currentByJump || jumpCount == null || jumpCount < 3);
-            if (autoPending && playing && flowTicks >= 3) {
+            // Once the decoder has produced 3 steady ticks in this session (or played > 1.5 s),
+            // do not require post-seek ticks before firing auto-skip.
+            boolean flowReady = flowTicks >= 3 || steadyTicks >= 3
+                    || (firstPlayingAt != 0 && now - firstPlayingAt > 1500L);
+            if (autoPending && playing && flowReady) {
                 if (currentByJump) jumpSkips.put(segment.key(), jumpCount == null ? 1 : jumpCount + 1);
                 skip(segment, true, pos, durationMs);
                 return;
@@ -649,8 +692,6 @@ public final class IntroSkipBridge {
             if (durationMs > 0 && target * 1000.0 > durationMs - 1000.0) {
                 target = Math.max(segment.startSeconds, (durationMs - 1000.0) / 1000.0);
             }
-            autoSkipped.add(segment.key());
-            autoSkipped.add(segment.label);
             String mode;
             skippedAt = SystemClock.uptimeMillis();
             try {
@@ -659,8 +700,13 @@ public final class IntroSkipBridge {
                 log("ERROR seek: " + error);
                 return;
             }
+            if (!automatic || target - pos >= 3.0) {
+                autoSkipped.add(segment.key());
+                autoSkipped.add(segment.label);
+            }
             guardUntil = SystemClock.uptimeMillis() + 2500L;
             guardTarget = target;
+            guardSegment = automatic ? segment : null;
             landingCheckAt = SystemClock.uptimeMillis() + 1000L;
             current = null;
             log((automatic ? "SKIP AUTO " : "SKIP MANUAL ") + segment.label + " " + fmt3(pos)
@@ -732,24 +778,40 @@ public final class IntroSkipBridge {
             }
             identity = id;
             if (movie) return;
-            String[] stremioKind = stremioVideoId(anchor);
-            if (stremioKind != null && parseInt(stremioKind[1]) == 0 && parseInt(stremioKind[2]) == 0) {
-                markMovie();
-                return;
+            // Defer chapter HTTP range requests and metadata reflection until the initial 2 s
+            // startup buffer is playing smoothly so we never stall ExoPlayer at stream start.
+            boolean startupSettled = (firstPlayingAt != 0 && now - firstPlayingAt >= 2000L)
+                    || now - attachedAt >= 4000L;
+            if (!startupSettled) return;
+            if (cachedVideoId == null) {
+                cachedVideoId = stremioVideoId(anchor);
+                if (cachedVideoId != null && parseInt(cachedVideoId[1]) == 0 && parseInt(cachedVideoId[2]) == 0) {
+                    markMovie();
+                    return;
+                }
             }
             if (!chaptersRequested) {
                 chaptersRequested = true;
                 startChapters(item == null || item.localConfiguration == null ? null
                         : item.localConfiguration.uri);
             }
-            if (loadedKey != null) return;
+            if (loadedKey != null) {
+                if (fetchedLength == 0 && durationMs > 0 && pendingInfo != null) {
+                    long realSec = Math.round(durationMs / 1000.0);
+                    if (realSec > 0) {
+                        log("Duration now known (" + realSec + "s): refreshing lookup");
+                        startFetch(pendingInfo, realSec);
+                    }
+                }
+                return;
+            }
             if (pendingInfo == null) {
                 // The metadata scan uses reflection: retry for ~30 s, then stop (movies,
                 // trailers) until the media item changes.
                 if (now < nextInfoAt || infoAttempts >= 20) return;
                 infoAttempts++;
                 nextInfoAt = now + 1500L;
-                MediaInfo info = mediaInfoFor(player, anchor);
+                MediaInfo info = mediaInfoFor(player, anchor, cachedVideoId);
                 if (!info.snapshot.equals(lastSnapshot)) {
                     lastSnapshot = info.snapshot;
                     log("MEDIA\n" + info.debug);
@@ -796,7 +858,8 @@ public final class IntroSkipBridge {
 
         private void startFetch(MediaInfo info, final long episodeLength) {
             loadedKey = info.key;
-            pendingInfo = null;
+            fetchedLength = episodeLength;
+            pendingInfo = info;
             if (!IntroSkipPrefs.isEnabled(activity)) {
                 aniDone = true;
                 introDone = true;
@@ -897,6 +960,22 @@ public final class IntroSkipBridge {
             boolean hadPrimary = !merged.isEmpty();
             if (fallback != null) {
                 for (Segment s : fallback) {
+                    if (hadPrimary && !"OP".equals(s.label)) continue;
+                    if ("OP".equals(s.label) && chapters != null && !chapters.isEmpty()) {
+                        for (int i = 0; i < merged.size(); i++) {
+                            Segment p = merged.get(i);
+                            if ("OP".equals(p.label)
+                                    && nearestBoundary(p.startSeconds, chapters) < 0
+                                    && nearestBoundary(s.startSeconds, chapters) >= 0
+                                    && nearestBoundary(s.endSeconds, chapters) >= 0) {
+                                log("Preferring chapter-aligned IntroDB OP (" + fmt3(s.startSeconds)
+                                        + "-" + fmt3(s.endSeconds) + ") over unaligned AniSkip OP ("
+                                        + fmt3(p.startSeconds) + "-" + fmt3(p.endSeconds) + ")");
+                                merged.remove(i);
+                                break;
+                            }
+                        }
+                    }
                     if (!hasSegmentType(merged, s.label) && !overlaps(merged, s.startSeconds, s.endSeconds)) {
                         merged.add(s);
                     }
@@ -1051,26 +1130,10 @@ public final class IntroSkipBridge {
             pill.setGravity(Gravity.CENTER);
             pill.setSingleLine(true);
             pill.setPadding(dp(22), dp(11), dp(22), dp(11));
-            pill.setFocusable(true);
+            pill.setFocusable(false);
             pill.setFocusableInTouchMode(false);
-            pill.setClickable(true);
-            pill.setOnFocusChangeListener(new View.OnFocusChangeListener() {
-                @Override
-                public void onFocusChange(View v, boolean hasFocus) {
-                    if (!pillShown || (pillSegment == null && !nextPill)) return;
-                    armed = hasFocus || !controlsVisible();
-                    styleArmed(armed);
-                    log("Button focus=" + hasFocus + " armed=" + armed);
-                }
-            });
-            pill.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    if (!pillShown || (pillSegment == null && !nextPill)) return;
-                    log("Button clicked via View.OnClickListener");
-                    triggerPillAction();
-                }
-            });
+            pill.setClickable(false);
+            pill.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             pill.setVisibility(View.GONE);
             pill.setAlpha(0f);
             if (Build.VERSION.SDK_INT >= 21) pill.setElevation(dp(8));
@@ -1083,6 +1146,7 @@ public final class IntroSkipBridge {
 
         private void triggerPillAction() {
             okDownConsumed = false;
+            manualArmed = false;
             if (nextPill) {
                 hidePill(false);
                 playNextEpisode();
@@ -1120,19 +1184,11 @@ public final class IntroSkipBridge {
             pillSegment = segment;
             nextPill = false;
             noticeUntil = 0;
-            pill.setFocusable(true);
-            pill.setClickable(true);
-            boolean focused = pill.hasFocus();
-            armed = focused || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
+            armed = manualArmed || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
             pill.setText(segment.buttonText());
             styleArmed(armed);
             fadeIn();
-            // When shown right after a user seek/rewind while OSD is visible, request focus on the
-            // pill so a single OK press immediately activates it without fighting the OSD.
-            if (currentBySeek && controlsVisible() && !focused) {
-                pill.requestFocus();
-            }
-            log("Button shown: " + segment.buttonText() + (armed ? " (armed, OK = skip)" : " (disarmed, focus or wait OSD)"));
+            log("Button shown: " + segment.buttonText() + (armed ? " (armed, OK = skip)" : " (disarmed, Down = arm)"));
         }
 
         private void showNextEpisode() {
@@ -1142,9 +1198,7 @@ public final class IntroSkipBridge {
             pillSegment = null;
             nextPill = true;
             noticeUntil = 0;
-            pill.setFocusable(true);
-            pill.setClickable(true);
-            armed = pill.hasFocus() || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
+            armed = manualArmed || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
             pill.setText("Next episode (OK)");
             styleArmed(armed);
             fadeIn();
@@ -1303,13 +1357,16 @@ public final class IntroSkipBridge {
         }
 
         private void refreshArmed(long now) {
-            boolean focused = pill != null && pill.hasFocus();
+            if (!controlsVisible()) {
+                manualArmed = false;
+            }
             boolean next = (pillSegment != null || nextPill)
-                    && (focused || (!controlsVisible() && now - lastOtherKeyAt > 600L));
+                    && (manualArmed || (!controlsVisible() && now - lastOtherKeyAt > 600L));
             if (next != armed) {
                 armed = next;
                 styleArmed(armed);
-                log("Button " + (armed ? "armed (OK = skip)" : "disarmed (OK to player)") + " focus=" + focused);
+                log("Button " + (armed ? "armed (OK = skip)" : "disarmed (OK to player)")
+                        + " manualArmed=" + manualArmed);
             }
         }
 
@@ -1319,9 +1376,8 @@ public final class IntroSkipBridge {
             pillSegment = null;
             nextPill = false;
             armed = false;
+            manualArmed = false;
             okDownConsumed = false;
-            pill.setFocusable(false);
-            pill.setClickable(false);
             noticeUntil = SystemClock.uptimeMillis() + 2200L;
             pill.setText(text);
             styleArmed(false);
@@ -1340,15 +1396,11 @@ public final class IntroSkipBridge {
 
         private void hidePill(boolean animate) {
             armed = false;
+            manualArmed = false;
             okDownConsumed = false;
             pillSegment = null;
             nextPill = false;
             noticeUntil = 0;
-            if (pill != null) {
-                if (pill.hasFocus()) pill.clearFocus();
-                pill.setFocusable(false);
-                pill.setClickable(false);
-            }
             if (pill == null || !pillShown) return;
             pillShown = false;
             pill.animate().cancel();
@@ -1409,7 +1461,11 @@ public final class IntroSkipBridge {
             }
         }
 
-        /** True = key consumed. OK on an armed or focused Skip button triggers the skip. */
+        /**
+         * True = key consumed. When OSD is hidden, OK skips and all other keys pass through to
+         * Stremio (summoning OSD). When OSD is visible, pressing Down once arms the pill so OK
+         * skips, and any other key (Up/Left/Right/Back) disarms and passes through to Stremio.
+         */
         boolean onKey(KeyEvent event) {
             if (closed || event == null) return false;
             int keyCode = event.getKeyCode();
@@ -1419,23 +1475,30 @@ public final class IntroSkipBridge {
             }
             if (!pillShown || (pillSegment == null && !nextPill)) {
                 okDownConsumed = false;
+                manualArmed = false;
                 return false;
             }
             if (!isOkKey(keyCode)) {
                 okDownConsumed = false;
-                if (action == KeyEvent.ACTION_DOWN) {
-                    // Pressing Down or Right while the pill is shown focuses the pill so the user
-                    // can highlight and click it with the TV remote.
-                    if ((keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
-                            && pill != null && !pill.hasFocus() && !controlsVisible()) {
-                        pill.requestFocus();
+                // Only intercept DPAD_DOWN when OSD is visible and the pill is not yet armed:
+                // this lets the user highlight the pill while OSD is up, without ever blocking
+                // DPAD_UP or trapping the user when OSD is hidden.
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && controlsVisible() && !manualArmed) {
+                    if (action == KeyEvent.ACTION_DOWN) {
+                        manualArmed = true;
                         armed = true;
                         styleArmed(true);
-                        log("Button focused via D-pad key=" + keyCode);
-                        return true;
+                        log("Button armed via D-pad Down (osd=true)");
+                    }
+                    return true;
+                }
+                if (action == KeyEvent.ACTION_DOWN) {
+                    if (manualArmed) {
+                        manualArmed = false;
+                        log("Button disarmed back to OSD key=" + keyCode);
                     }
                     lastOtherKeyAt = SystemClock.uptimeMillis();
-                    if (armed && (pill == null || !pill.hasFocus())) {
+                    if (armed) {
                         armed = false;
                         styleArmed(false);
                     }
@@ -1445,13 +1508,13 @@ public final class IntroSkipBridge {
             if (action == KeyEvent.ACTION_DOWN) {
                 if (event.getRepeatCount() == 0) {
                     refreshArmed(SystemClock.uptimeMillis());
-                    okDownConsumed = armed || (pill != null && pill.hasFocus());
+                    okDownConsumed = armed;
                 }
                 return okDownConsumed;
             }
             if (action == KeyEvent.ACTION_UP) {
-                if (!okDownConsumed && !(pill != null && pill.hasFocus())) return false;
-                log("Button activated via OK key (armed=" + armed + ", focus=" + (pill != null && pill.hasFocus()) + ")");
+                if (!okDownConsumed) return false;
+                log("Button activated via OK key (armed=" + armed + ", manualArmed=" + manualArmed + ")");
                 triggerPillAction();
                 return true;
             }
@@ -1855,19 +1918,27 @@ public final class IntroSkipBridge {
     }
 
     /** Test-only switches set with `adb shell setprop <name> 1`; off by default. */
+    private static final java.util.Map<String, Boolean> SYSPROPS =
+            new java.util.concurrent.ConcurrentHashMap<String, Boolean>();
+
+    /** Test-only switches set with `adb shell setprop <name> 1`; cached per process. */
     private static boolean sysprop(String name) {
+        Boolean cached = SYSPROPS.get(name);
+        if (cached != null) return cached.booleanValue();
+        boolean result = false;
         try {
             Object value = Class.forName("android.os.SystemProperties")
                     .getMethod("get", String.class).invoke(null, name);
-            return "1".equals(value);
+            result = "1".equals(value);
         } catch (Throwable ignored) {
-            return false;
         }
+        SYSPROPS.put(name, Boolean.valueOf(result));
+        return result;
     }
 
     private static final Pattern CHAPTER_INTRO = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:op\\d*|opening|"
             + "abertura|apertura|ouverture|vorspann|g[ée]n[ée]rique(?: de)? d[ée]but|main titles?|"
-            + "title sequence|theme song)(?:$|[^\\p{L}])|オープニング");
+            + "title sequence|theme song|вступні титри|опенинг|заставка)(?:$|[^\\p{L}])|オープニング");
     /** "Intro" is the cold open in many fansubs ("Intro" 0-114 s, then "OP"): weak evidence only. */
     private static final Pattern CHAPTER_WEAK_INTRO = Pattern.compile(
             "(?iu)(?:^|[^\\p{L}])(?:intro|introduction)(?:$|[^\\p{L}])");
@@ -1875,9 +1946,9 @@ public final class IntroSkipBridge {
             + "story so far|r[ée]sum[ée]|resumen|recapitula[çc][ãa]o|r[üu]ckblick|zusammenfassung)(?:$|[^\\p{L}])|あらすじ");
     private static final Pattern CHAPTER_CREDITS = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:ed\\d*|ending|"
             + "outro|credits|end credits|ending credits|closing credits|end theme|ending theme|"
-            + "encerramento|generique de fin|abspann)(?:$|[^\\p{L}])|エンディング");
+            + "encerramento|generique de fin|abspann|кінцеві титри|заключні титри|эндинг)(?:$|[^\\p{L}])|エンディング");
     private static final Pattern CHAPTER_PREVIEW = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:preview|"
-            + "next episode|trailer|apercu|vorschau)(?:$|[^\\p{L}])|予告");
+            + "next episode|trailer|apercu|vorschau|у наступному епізоді|в следующей серии|превью)(?:$|[^\\p{L}])|予告");
     private static final Pattern CHAPTER_NOT = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:eyecatch)(?:$|[^\\p{L}])");
 
     /** Chapters whose NAME says opening/intro/recap/credits/preview: their exact start/end. */
@@ -2014,7 +2085,7 @@ public final class IntroSkipBridge {
         }
     }
 
-    private static MediaInfo mediaInfoFor(Player player, View playerView) {
+    private static MediaInfo mediaInfoFor(Player player, View playerView, String[] presetStremioId) {
         MediaItem item = player.getCurrentMediaItem();
         MediaMetadata playerMetadata = player.getMediaMetadata();
         MediaMetadata itemMetadata = item == null ? null : item.mediaMetadata;
@@ -2058,25 +2129,28 @@ public final class IntroSkipBridge {
             }
         }
 
-        StringBuilder reflective = new StringBuilder();
-        List<String> reflectedTitles = new ArrayList<>();
-        List<String> reflectedEpisodes = new ArrayList<>();
-        Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
-        collectReflectiveCandidates(player, reflectedTitles, reflectedEpisodes, reflective, 0, visited);
-        collectReflectiveCandidates(item, reflectedTitles, reflectedEpisodes, reflective, 0, visited);
-        titleCandidates.addAll(reflectedTitles);
-        episodeCandidates.addAll(reflectedEpisodes);
-
-        String title = firstTitle(titleCandidates);
-        // Stremio puts "<Show> - S01E07 - <Episode>" in the player metadata title: that is the
-        // episode the user picked, so it wins over anything parsed from the stream URL (torrent
-        // URLs carry the file index, e.g. .../6/<file>.mkv for episode 7).
-        int[] metaSxE = metadataSeasonEpisode(playerMetadata, itemMetadata);
-        // Stremio's own video id ("tt1844624:13:1") comes first: it does not depend on the addon.
-        String[] stremioId = stremioVideoId(playerView);
+        String[] stremioId = presetStremioId != null ? presetStremioId : stremioVideoId(playerView);
         int vidEpisode = stremioId == null ? 0 : parseInt(stremioId[2]);
-        int episode = vidEpisode > 0 ? vidEpisode
+        int[] metaSxE = metadataSeasonEpisode(playerMetadata, itemMetadata);
+        String fastTitle = firstTitle(titleCandidates);
+        int fastEpisode = vidEpisode > 0 ? vidEpisode
                 : metaSxE[1] > 0 ? metaSxE[1] : firstEpisode(episodeCandidates);
+
+        // Only walk the player object graph via reflection when fast metadata did not yield
+        // both a usable title and an episode number.
+        StringBuilder reflective = new StringBuilder();
+        if (fastTitle.length() == 0 || fastEpisode <= 0) {
+            List<String> reflectedTitles = new ArrayList<>();
+            List<String> reflectedEpisodes = new ArrayList<>();
+            Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
+            collectReflectiveCandidates(player, reflectedTitles, reflectedEpisodes, reflective, 0, visited);
+            collectReflectiveCandidates(item, reflectedTitles, reflectedEpisodes, reflective, 0, visited);
+            titleCandidates.addAll(reflectedTitles);
+            episodeCandidates.addAll(reflectedEpisodes);
+        }
+
+        String title = fastTitle.length() > 0 ? fastTitle : firstTitle(titleCandidates);
+        int episode = fastEpisode > 0 ? fastEpisode : firstEpisode(episodeCandidates);
         if (episode == 0) {
             episode = fallbackTrackNumber(playerMetadata, itemMetadata);
         }
@@ -2571,11 +2645,24 @@ public final class IntroSkipBridge {
     }
 
     private static void parseAniSkipArray(JSONArray results, List<Segment> segments,
-                                          long episodeLength, DebugLogger logger) {
-        if (results == null) return;
+                                          final long episodeLength, DebugLogger logger) {
+        if (results == null || results.length() == 0) return;
+        List<JSONObject> sorted = new ArrayList<>();
         for (int i = 0; i < results.length(); i++) {
-            JSONObject result = results.optJSONObject(i);
-            if (result == null) continue;
+            JSONObject item = results.optJSONObject(i);
+            if (item != null) sorted.add(item);
+        }
+        Collections.sort(sorted, new java.util.Comparator<JSONObject>() {
+            @Override
+            public int compare(JSONObject a, JSONObject b) {
+                double lenA = a.optDouble("episodeLength", 0.0);
+                double lenB = b.optDouble("episodeLength", 0.0);
+                double diffA = (episodeLength > 0 && lenA > 0) ? Math.abs(lenA - episodeLength) : Double.MAX_VALUE;
+                double diffB = (episodeLength > 0 && lenB > 0) ? Math.abs(lenB - episodeLength) : Double.MAX_VALUE;
+                return Double.compare(diffA, diffB);
+            }
+        });
+        for (JSONObject result : sorted) {
             JSONObject interval = result.optJSONObject("interval");
             if (interval == null) continue;
             double start = interval.optDouble("startTime", -1.0);
@@ -2747,7 +2834,9 @@ public final class IntroSkipBridge {
      * (c) then TheIntroDB with that id + season/episode (+ duration_ms when known),
      * retrying a miss by tvdb_id and then tmdb_id (ids from a keyless Cinemeta
      * meta lookup, cached per show);
-     * (d) then IntroDB.app, but only for segment types TheIntroDB has nothing for.
+     * (d) then IntroDB.app for missing segment types (a real mid-episode OP
+     * replaces a 0.0s TheIntroDB OP and evicts overlapping mislabeled
+     * "credits"; an early "credits" with no OP anywhere is promoted).
      * Runs on a NETWORK thread, never on the main thread, and never blocks AniSkip
      * (separate thread) or chapter skipping.
      */
@@ -2789,6 +2878,11 @@ public final class IntroSkipBridge {
                         continue;
                     }
                     double start = item.isNull("start_ms") ? 0.0 : item.optLong("start_ms", -1L) / 1000.0;
+                    if ("recap".equals(kind) && start <= 0.5) {
+                        logger.log("IntroDB: skipped 0:00 recap (" + start + "s -> "
+                                + (item.optLong("end_ms", -1L) / 1000.0) + "s)");
+                        continue;
+                    }
                     double end;
                     if (item.isNull("end_ms")) {
                         end = -1.0;
@@ -2811,11 +2905,28 @@ public final class IntroSkipBridge {
                     logger.log("Segment IntroDB: " + kind + " " + start + "s -> " + end + "s");
                 }
             }
-            // IntroDB.app fills only the segment types TheIntroDB has nothing for.
-            if (isImdbId(id) && season > 0 && episode > 0
-                    && !(hasSegmentType(out, "OP") && hasSegmentType(out, "recap")
-                    && hasSegmentType(out, "credits") && hasSegmentType(out, "preview"))) {
+            // IntroDB.app fills missing segment types, replaces a 0.0s TheIntroDB OP when
+            // IntroDB.app has a mid-episode OP (startSeconds > 5.0s), and evicts any
+            // mislabeled TheIntroDB "credits" that overlaps IntroDB.app's OP.
+            if (isImdbId(id) && season > 0 && episode > 0) {
                 for (Segment app : fetchIntroDbApp(id, season, episode, logger)) {
+                    if ("OP".equals(app.label)) {
+                        for (int i = out.size() - 1; i >= 0; i--) {
+                            Segment existing = out.get(i);
+                            if ("OP".equals(existing.label) && existing.startSeconds <= 0.5 && app.startSeconds > 5.0) {
+                                logger.log("IntroDB.app: replacing 0:00 IntroDB OP with mid-episode OP "
+                                        + app.startSeconds + "s -> " + app.endSeconds + "s");
+                                out.remove(i);
+                            } else if ("credits".equals(existing.label)
+                                    && Math.min(existing.endSeconds, app.endSeconds)
+                                    - Math.max(existing.startSeconds, app.startSeconds) > 1.0) {
+                                logger.log("IntroDB.app: replacing overlapping IntroDB credits ("
+                                        + existing.startSeconds + "s -> " + existing.endSeconds
+                                        + "s) with OP " + app.startSeconds + "s -> " + app.endSeconds + "s");
+                                out.remove(i);
+                            }
+                        }
+                    }
                     if (hasSegmentType(out, app.label)) {
                         logger.log("IntroDB.app: skipped " + app.label + ", TheIntroDB already has it");
                         continue;
@@ -2827,6 +2938,21 @@ public final class IntroSkipBridge {
                     out.add(app);
                     logger.log("Segment IntroDB.app: " + app.label + " " + app.startSeconds
                             + "s -> " + app.endSeconds + "s");
+                }
+            }
+            // If TheIntroDB mislabeled an opening sequence in the first 35% of the episode as
+            // "credits" and neither source provided a separate OP, promote it to OP.
+            if (!hasSegmentType(out, "OP")) {
+                double maxIntroStart = episodeLength > 0 ? episodeLength * 0.35 : 300.0;
+                for (int i = 0; i < out.size(); i++) {
+                    Segment s = out.get(i);
+                    if ("credits".equals(s.label) && s.startSeconds < maxIntroStart
+                            && (episodeLength <= 0 || s.endSeconds < episodeLength * 0.5)) {
+                        out.set(i, new Segment(s.startSeconds, s.endSeconds, "OP", s.source));
+                        logger.log("IntroDB: promoted early credits (" + s.startSeconds + "s -> "
+                                + s.endSeconds + "s) to OP");
+                        break;
+                    }
                 }
             }
         } catch (Exception error) {

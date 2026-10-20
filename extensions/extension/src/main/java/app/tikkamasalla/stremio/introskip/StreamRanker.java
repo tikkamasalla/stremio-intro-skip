@@ -371,8 +371,8 @@ public final class StreamRanker {
     static final int EP_MULTI = 2;
     static final int EP_PACK = 3;
 
-    private static final String SEP = "[\\s._•·-]{0,3}";
-    // S01E02, S01 . E02, S01E02E03, S01E02-E04, S01E02-04 (ranges need an E or a hyphen).
+    private static final String SEP = "[\\s._\u2022\u00b7-]{0,5}";
+    // S01E02, S01 • E02, S01E02E03, S01E02-E04, S01E02-04 (ranges need an E or a hyphen).
     private static final Pattern SXXEYY_PATTERN = Pattern.compile(
             B_START + "S(\\d{1,2})" + SEP + "EP?(\\d{1,4})(?:(?:\\s*[-~]\\s*EP?|[._]?EP?)(\\d{1,4})(?![A-Za-z0-9]))?",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
@@ -389,7 +389,10 @@ public final class StreamRanker {
             B_START + "(?:seasons?[\\s._-]*|s)(\\d{1,2})(?:\\s*(?:-|~|to|&)\\s*(?:seasons?[\\s._-]*|s)(\\d{1,2})|[-~](\\d{1,2}))" + B_END,
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     private static final Pattern SEASON_ONLY_PATTERN = Pattern.compile(
-            B_START + "(?:seasons?[\\s._-]*|s)(\\d{1,2})" + B_END + "(?!" + SEP + "EP?\\d)",
+            B_START + "(?:(?:seasons?[\\s._-]*|s)(\\d{1,2})|(\\d{1,2})(?:st|nd|rd|th)[\\s._-]+season)" + B_END + "(?!" + SEP + "EP?\\d)",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern FINAL_SEASON_PATTERN = Pattern.compile(
+            B_START + "final[\\s._-]+season" + B_END,
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     private static final Pattern PACK_WORD_PATTERN = Pattern.compile(
             B_START + "(?:complete|pack|collection|integrale|all[\\s._-]*seasons|full[\\s._-]*series|\u0441\u0435\u0437\u043E\u043D|\u0441\u0435\u0440\u0438\u0438)" + B_END,
@@ -483,9 +486,13 @@ public final class StreamRanker {
                 blank(rest, m.start(), m.end());
             }
             text = rest.toString();
+            if (reqSeason == 1 && FINAL_SEASON_PATTERN.matcher(text).find()) {
+                return EP_REJECT;
+            }
             m = SEASON_ONLY_PATTERN.matcher(text);
             while (m.find()) {
-                int s = Integer.parseInt(m.group(1));
+                String g = m.group(1) != null ? m.group(1) : m.group(2);
+                int s = Integer.parseInt(g);
                 seasons.add(new int[] {s, s});
             }
 
