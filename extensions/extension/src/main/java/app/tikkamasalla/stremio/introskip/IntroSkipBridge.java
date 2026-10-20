@@ -90,7 +90,7 @@ public final class IntroSkipBridge {
     private static final String CINEMETA_SERIES_URL = "https://v3-cinemeta.strem.io/catalog/series/top/search=";
     private static final String CINEMETA_MOVIE_URL = "https://v3-cinemeta.strem.io/catalog/movie/top/search=";
     private static final Pattern STREMIO_VIDEO_ID =
-            Pattern.compile("^(tt\\d{7,10})(?::(\\d{1,3}):(\\d{1,4}))?$");
+            Pattern.compile("^(?:(tt\\d{7,10})(?::(\\d{1,3}):(\\d{1,4}))?|kitsu:\\d+:(\\d{1,4}))$");
     private static final Object CINEMETA_LOCK = new Object();
     private static final Map<String, String> CINEMETA_CACHE =
             new java.util.concurrent.ConcurrentHashMap<String, String>();
@@ -104,7 +104,7 @@ public final class IntroSkipBridge {
     private static final Pattern SEASON_EPISODE = Pattern.compile("(?i)(?:^|[^a-z0-9])S\\d{1,2}[ ._-]*E(\\d{1,4})(?=$|[^a-z0-9])");
     private static final Pattern SEASON = Pattern.compile("(?i)(?:^|[^a-z0-9])S(\\d{1,2})(?:[ ._-]*E\\d{1,4})?(?=$|[^a-z0-9])");
     private static final Pattern SEASON_WORD = Pattern.compile("(?i)(?:^|[^a-z0-9])(?:season|saison)[ ._-]*(\\d{1,2})(?=$|[^a-z0-9])");
-    private static final Pattern EPISODE = Pattern.compile("(?i)(?:\\bepisode|\\bep|[ ._/-]e)[ ._/-]*(\\d{1,4})\\b");
+    private static final Pattern EPISODE = Pattern.compile("(?i)(?:\\bepisode|\\bep|[ ._/-]e)[ ._/-]*(\\d{1,4})\\b|(?:^|[\\s._])-\\s*[._]?(\\d{2,3})(?:v\\d)?(?=[\\s._]|$|\\[|\\()");
     private static final Pattern STRUCTURED_TITLE = Pattern.compile(
             "(?i)(?:title|name|series|show|anime|mediaTitle|torrent_name|torrentName|filename|file_name|fileName)\\s*[:=]\\s*[\\\"']?([^,}\\]\\\"']+)");
     private static final String TAG = "IntroSkip";
@@ -244,6 +244,8 @@ public final class IntroSkipBridge {
         private String appliedSignature;
         // playback tracking
         private double lastPos = -1;
+        private double flowPos = -1;
+        private int flowTicks;
         private long lastPollAt;
         private Segment current;
         private boolean currentBySeek;
@@ -266,6 +268,7 @@ public final class IntroSkipBridge {
         private TextView pill;
         private boolean pillShown;
         private boolean armed;
+        private boolean okDownConsumed;
         private long lastOtherKeyAt;
         private Segment pillSegment;
         private boolean nextPill;
@@ -378,6 +381,9 @@ public final class IntroSkipBridge {
             currentByJump = false;
             lastSeekKeyAt = 0;
             lastPos = -1;
+            flowPos = -1;
+            flowTicks = 0;
+            okDownConsumed = false;
             lastPollAt = 0;
             guardUntil = 0;
             guardTarget = 0;
@@ -499,6 +505,10 @@ public final class IntroSkipBridge {
             long elapsed = lastPollAt == 0 ? POLL_MS : now - lastPollAt;
             boolean jumped = lastPos >= 0
                     && (pos < lastPos - 0.75 || pos > lastPos + elapsed / 1000.0 * 2.5 + 1.0);
+            double moved = flowPos < 0 ? 0 : pos - flowPos;
+            flowPos = pos;
+            if (!playing || moved < 0 || moved >= 1.5) flowTicks = 0;
+            else if (moved > 0) flowTicks++;
             lastPos = pos;
             lastPollAt = now;
             if (playing && firstPlayingAt == 0) firstPlayingAt = now;
@@ -521,6 +531,7 @@ public final class IntroSkipBridge {
                 }
                 guardUntil = 0;
                 jumped = false;
+                if (playing) flowTicks = 3;
             }
 
             Segment segment = segments.isEmpty() ? null : segmentAt(pos);
@@ -547,7 +558,7 @@ public final class IntroSkipBridge {
             boolean autoPending = segment != null && !currentBySeek && autoWanted
                     && !wasSkipped(segment)
                     && (!currentByJump || jumpCount == null || jumpCount < 3);
-            if (autoPending && playing) {
+            if (autoPending && playing && flowTicks >= 3) {
                 if (currentByJump) jumpSkips.put(segment.key(), jumpCount == null ? 1 : jumpCount + 1);
                 skip(segment, true, pos, durationMs);
                 return;
@@ -576,8 +587,9 @@ public final class IntroSkipBridge {
             }
 
             if (segment != null && playWhenReady && !autoPending) {
+                installKeys();
                 nextPill = false;
-                if (pillSegment != segment || noticeUntil != 0) showButton(segment);
+                if (pillSegment != segment || noticeUntil != 0 || !pillShown) showButton(segment);
                 refreshArmed(now);
             } else if (noticeUntil != 0) {
                 if (now > noticeUntil) hidePill(true);
@@ -864,13 +876,7 @@ public final class IntroSkipBridge {
             if (closed || generation != fetchGeneration) return;
             aniDone = true;
             onlineStartedAt = startedAt;
-            if (!found.isEmpty()) {
-                online = found;
-                onlineSource = "AniSkip";
-            } else if (introDone) {
-                online = introResult;
-                onlineSource = "IntroDB";
-            }
+            mergeOnline(found, introDone ? introResult : null);
             combine(SystemClock.uptimeMillis());
         }
 
@@ -878,10 +884,27 @@ public final class IntroSkipBridge {
             if (closed || generation != fetchGeneration) return;
             introDone = true;
             introResult = found;
-            if (aniDone && online == null) {
-                online = found;
-                onlineSource = "IntroDB";
+            if (aniDone) {
+                mergeOnline(online, found);
                 combine(SystemClock.uptimeMillis());
+            }
+        }
+
+        /** Keeps AniSkip first, and fills any missing segment type (e.g. OP) from IntroDB. */
+        private void mergeOnline(List<Segment> primary, List<Segment> fallback) {
+            List<Segment> merged = new ArrayList<>();
+            if (primary != null) merged.addAll(primary);
+            boolean hadPrimary = !merged.isEmpty();
+            if (fallback != null) {
+                for (Segment s : fallback) {
+                    if (!hasSegmentType(merged, s.label) && !overlaps(merged, s.startSeconds, s.endSeconds)) {
+                        merged.add(s);
+                    }
+                }
+            }
+            if (!merged.isEmpty() || introDone) {
+                online = merged;
+                onlineSource = hadPrimary ? "AniSkip" : "IntroDB";
             }
         }
 
@@ -937,16 +960,24 @@ public final class IntroSkipBridge {
             boolean strongIntro = false;
             for (Segment segment : named) strongIntro |= !segment.isRecap() && !segment.isCredits() && !segment.isPreview();
             if (!strongIntro && online != null && !waitChapters) {
-                // An "Intro" chapter counts only if no OP/Opening chapter exists and AniSkip/IntroDB
-                // has nothing, or has an intro starting and ending within 15 s of that chapter.
+                // A weak "Intro" chapter only counts if an online source agrees within 15 s
+                // (never when online is empty, as fansubs often name the 0:00 cold open "Intro").
                 for (Segment weak : chapterSegments(chapters, true)) {
-                    boolean confirmed = online.isEmpty();
+                    boolean confirmed = false;
                     for (Segment o : online) {
                         if (!o.isRecap() && !o.isCredits() && !o.isPreview()
                                 && Math.abs(o.startSeconds - weak.startSeconds) <= 15.0
-                                && Math.abs(o.endSeconds - weak.endSeconds) <= 15.0) confirmed = true;
+                                && Math.abs(o.endSeconds - weak.endSeconds) <= 15.0) {
+                            confirmed = true;
+                            break;
+                        }
                     }
-                    if (confirmed) named.add(weak);
+                    if (confirmed) {
+                        named.add(weak);
+                    } else {
+                        log("Weak chapter ignored (no online match within 15s): "
+                                + fmt3(weak.startSeconds) + "-" + fmt3(weak.endSeconds));
+                    }
                 }
             }
             if (named.isEmpty() && (online == null || waitChapters)) return;
@@ -1020,9 +1051,26 @@ public final class IntroSkipBridge {
             pill.setGravity(Gravity.CENTER);
             pill.setSingleLine(true);
             pill.setPadding(dp(22), dp(11), dp(22), dp(11));
-            pill.setFocusable(false);
-            pill.setClickable(false);
-            pill.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            pill.setFocusable(true);
+            pill.setFocusableInTouchMode(false);
+            pill.setClickable(true);
+            pill.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+                @Override
+                public void onFocusChange(View v, boolean hasFocus) {
+                    if (!pillShown || (pillSegment == null && !nextPill)) return;
+                    armed = hasFocus || !controlsVisible();
+                    styleArmed(armed);
+                    log("Button focus=" + hasFocus + " armed=" + armed);
+                }
+            });
+            pill.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (!pillShown || (pillSegment == null && !nextPill)) return;
+                    log("Button clicked via View.OnClickListener");
+                    triggerPillAction();
+                }
+            });
             pill.setVisibility(View.GONE);
             pill.setAlpha(0f);
             if (Build.VERSION.SDK_INT >= 21) pill.setElevation(dp(8));
@@ -1031,6 +1079,27 @@ public final class IntroSkipBridge {
                     Gravity.BOTTOM | Gravity.END);
             params.setMargins(0, 0, dp(48), dp(48));
             host.addView(pill, params);
+        }
+
+        private void triggerPillAction() {
+            okDownConsumed = false;
+            if (nextPill) {
+                hidePill(false);
+                playNextEpisode();
+                return;
+            }
+            Segment segment = pillSegment;
+            if (segment == null) return;
+            double pos = 0;
+            long duration = -1;
+            try {
+                pos = player.getCurrentPosition() / 1000.0;
+                duration = player.getDuration();
+            } catch (Throwable ignored) {
+                // Use defaults.
+            }
+            hidePill(false);
+            skip(segment, false, pos, duration);
         }
 
         private void styleArmed(boolean isArmed) {
@@ -1047,23 +1116,35 @@ public final class IntroSkipBridge {
         private void showButton(Segment segment) {
             ensurePill();
             if (pill == null) return;
+            installKeys();
             pillSegment = segment;
             nextPill = false;
             noticeUntil = 0;
-            armed = !controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L;
+            pill.setFocusable(true);
+            pill.setClickable(true);
+            boolean focused = pill.hasFocus();
+            armed = focused || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
             pill.setText(segment.buttonText());
             styleArmed(armed);
             fadeIn();
-            log("Button shown: " + segment.buttonText() + (armed ? " (OK = skip)" : " (OK to player)"));
+            // When shown right after a user seek/rewind while OSD is visible, request focus on the
+            // pill so a single OK press immediately activates it without fighting the OSD.
+            if (currentBySeek && controlsVisible() && !focused) {
+                pill.requestFocus();
+            }
+            log("Button shown: " + segment.buttonText() + (armed ? " (armed, OK = skip)" : " (disarmed, focus or wait OSD)"));
         }
 
         private void showNextEpisode() {
             ensurePill();
             if (pill == null) return;
+            installKeys();
             pillSegment = null;
             nextPill = true;
             noticeUntil = 0;
-            armed = !controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L;
+            pill.setFocusable(true);
+            pill.setClickable(true);
+            armed = pill.hasFocus() || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
             pill.setText("Next episode (OK)");
             styleArmed(armed);
             fadeIn();
@@ -1222,11 +1303,13 @@ public final class IntroSkipBridge {
         }
 
         private void refreshArmed(long now) {
-            boolean next = (pillSegment != null || nextPill) && !controlsVisible() && now - lastOtherKeyAt > 600L;
+            boolean focused = pill != null && pill.hasFocus();
+            boolean next = (pillSegment != null || nextPill)
+                    && (focused || (!controlsVisible() && now - lastOtherKeyAt > 600L));
             if (next != armed) {
                 armed = next;
                 styleArmed(armed);
-                log("Button " + (armed ? "armed (OK = skip)" : "disarmed (OK to player)"));
+                log("Button " + (armed ? "armed (OK = skip)" : "disarmed (OK to player)") + " focus=" + focused);
             }
         }
 
@@ -1236,6 +1319,9 @@ public final class IntroSkipBridge {
             pillSegment = null;
             nextPill = false;
             armed = false;
+            okDownConsumed = false;
+            pill.setFocusable(false);
+            pill.setClickable(false);
             noticeUntil = SystemClock.uptimeMillis() + 2200L;
             pill.setText(text);
             styleArmed(false);
@@ -1254,9 +1340,15 @@ public final class IntroSkipBridge {
 
         private void hidePill(boolean animate) {
             armed = false;
+            okDownConsumed = false;
             pillSegment = null;
             nextPill = false;
             noticeUntil = 0;
+            if (pill != null) {
+                if (pill.hasFocus()) pill.clearFocus();
+                pill.setFocusable(false);
+                pill.setClickable(false);
+            }
             if (pill == null || !pillShown) return;
             pillShown = false;
             pill.animate().cancel();
@@ -1317,44 +1409,53 @@ public final class IntroSkipBridge {
             }
         }
 
-        /** True = key consumed. Only OK on an armed Skip button is ever consumed. */
+        /** True = key consumed. OK on an armed or focused Skip button triggers the skip. */
         boolean onKey(KeyEvent event) {
-            if (closed) return false;
-            if (event.getAction() == KeyEvent.ACTION_DOWN && isSeekKey(event.getKeyCode())) {
+            if (closed || event == null) return false;
+            int keyCode = event.getKeyCode();
+            int action = event.getAction();
+            if (action == KeyEvent.ACTION_DOWN && isSeekKey(keyCode)) {
                 lastSeekKeyAt = SystemClock.uptimeMillis();
             }
-            if (!pillShown || (pillSegment == null && !nextPill)) return false;
-            if (!isOkKey(event.getKeyCode())) {
-                if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                    // Any other key gives OK back to the player controls it just woke up.
+            if (!pillShown || (pillSegment == null && !nextPill)) {
+                okDownConsumed = false;
+                return false;
+            }
+            if (!isOkKey(keyCode)) {
+                okDownConsumed = false;
+                if (action == KeyEvent.ACTION_DOWN) {
+                    // Pressing Down or Right while the pill is shown focuses the pill so the user
+                    // can highlight and click it with the TV remote.
+                    if ((keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
+                            && pill != null && !pill.hasFocus() && !controlsVisible()) {
+                        pill.requestFocus();
+                        armed = true;
+                        styleArmed(true);
+                        log("Button focused via D-pad key=" + keyCode);
+                        return true;
+                    }
                     lastOtherKeyAt = SystemClock.uptimeMillis();
-                    if (armed) {
+                    if (armed && (pill == null || !pill.hasFocus())) {
                         armed = false;
                         styleArmed(false);
                     }
                 }
                 return false;
             }
-            if (!armed) return false;
-            if (event.getAction() == KeyEvent.ACTION_UP) {
-                if (nextPill) {
-                    hidePill(false);
-                    playNextEpisode();
-                    return true;
+            if (action == KeyEvent.ACTION_DOWN) {
+                if (event.getRepeatCount() == 0) {
+                    refreshArmed(SystemClock.uptimeMillis());
+                    okDownConsumed = armed || (pill != null && pill.hasFocus());
                 }
-                Segment segment = pillSegment;
-                double pos = 0;
-                long duration = -1;
-                try {
-                    pos = player.getCurrentPosition() / 1000.0;
-                    duration = player.getDuration();
-                } catch (Throwable ignored) {
-                    // Use defaults.
-                }
-                hidePill(false);
-                skip(segment, false, pos, duration);
+                return okDownConsumed;
             }
-            return true;
+            if (action == KeyEvent.ACTION_UP) {
+                if (!okDownConsumed && !(pill != null && pill.hasFocus())) return false;
+                log("Button activated via OK key (armed=" + armed + ", focus=" + (pill != null && pill.hasFocus()) + ")");
+                triggerPillAction();
+                return true;
+            }
+            return okDownConsumed;
         }
 
         // -------------------------------------------------------------- debug
@@ -1875,10 +1976,10 @@ public final class IntroSkipBridge {
         }
 
         String buttonText() {
-            if (isRecap()) return "Skip recap";
-            if (isCredits()) return "Skip credits";
-            if (isPreview()) return "Skip preview";
-            return "Skip intro";
+            if (isRecap()) return "Skip recap (OK)";
+            if (isCredits()) return "Skip credits (OK)";
+            if (isPreview()) return "Skip preview (OK)";
+            return "Skip intro (OK)";
         }
 
         String skippedText() {
@@ -2124,7 +2225,10 @@ public final class IntroSkipBridge {
             if (videoId.length() == 0) videoId = safe(((Bundle) args).getString("id"));
             Matcher matcher = STREMIO_VIDEO_ID.matcher(videoId);
             if (!matcher.find()) return null;
-            return new String[]{matcher.group(1),
+            if (matcher.group(4) != null) {
+                return new String[]{"", "0", matcher.group(4)};
+            }
+            return new String[]{safe(matcher.group(1)),
                     matcher.group(2) == null ? "0" : matcher.group(2),
                     matcher.group(3) == null ? "0" : matcher.group(3)};
         } catch (Throwable ignored) {
@@ -2268,7 +2372,9 @@ public final class IntroSkipBridge {
         }
         if (found) {
             try {
-                return Integer.parseInt(matcher.group(1));
+                String g = matcher.group(1) != null ? matcher.group(1)
+                        : (matcher.groupCount() >= 2 ? matcher.group(2) : null);
+                return g == null ? 0 : Integer.parseInt(g);
             } catch (NumberFormatException ignored) {
                 return 0;
             }
@@ -2447,41 +2553,47 @@ public final class IntroSkipBridge {
             }
             logger.log("AniList: idMal = " + malId);
             // AniSkip only returns submissions whose length is close to ours (right timing);
-            // length 0 = any cut, used only when nothing matches ours.
+            // if no OP is returned at our length (e.g. only ED matched our length), retry with 0.
             JSONArray results = aniSkipResults(malId, episode, Math.max(0L, episodeLength), logger);
-            if ((results == null || results.length() == 0) && episodeLength > 0) {
-                logger.log("AniSkip: no submissions for length " + episodeLength + "s, trying any length");
-                results = aniSkipResults(malId, episode, 0L, logger);
+            parseAniSkipArray(results, segments, episodeLength, logger);
+            if (!hasSegmentType(segments, "OP") && episodeLength > 0) {
+                logger.log("AniSkip: no OP for length " + episodeLength + "s, trying any length (0)");
+                JSONArray fallback = aniSkipResults(malId, episode, 0L, logger);
+                parseAniSkipArray(fallback, segments, episodeLength, logger);
             }
-            if (results == null) {
-                logger.log("AniSkip: results field missing or unusable response");
-                return segments;
-            }
-            for (int i = 0; i < results.length(); i++) {
-                JSONObject result = results.optJSONObject(i);
-                if (result == null) continue;
-                JSONObject interval = result.optJSONObject("interval");
-                if (interval == null) continue;
-                double start = interval.optDouble("startTime", -1.0);
-                double end = interval.optDouble("endTime", -1.0);
-                if (start < 0.0 || end <= start) continue;
-                String type = result.optString("skipType", "").toLowerCase(Locale.US);
-                String label;
-                if ("op".equals(type) || type.startsWith("op") || "mixed-op".equals(type)) label = "OP";
-                else if ("recap".equals(type)) label = "recap";
-                else if ("ed".equals(type) || type.startsWith("ed") || "mixed-ed".equals(type)) label = "credits";
-                else continue;
-                double theirLength = result.optDouble("episodeLength", 0.0);
-                if (overlaps(segments, start, end)) continue;
-                segments.add(new Segment(start, end, label, "AniSkip"));
-                logger.log("Segment AniSkip: " + label + " " + fmt3(start) + "s -> " + fmt3(end)
-                        + "s (measured on " + fmt3(theirLength) + "s, our length " + episodeLength + "s, diff "
-                        + (episodeLength > 0 && theirLength > 0 ? fmt3(theirLength - episodeLength) + "s" : "?") + ")");
+            if (segments.isEmpty()) {
+                logger.log("AniSkip: no usable segments for malId=" + malId + " ep=" + episode);
             }
         } catch (Exception error) {
             logger.log("ERROR AniSkip: " + error.getClass().getSimpleName() + ": " + safe(error.getMessage()));
         }
         return segments;
+    }
+
+    private static void parseAniSkipArray(JSONArray results, List<Segment> segments,
+                                          long episodeLength, DebugLogger logger) {
+        if (results == null) return;
+        for (int i = 0; i < results.length(); i++) {
+            JSONObject result = results.optJSONObject(i);
+            if (result == null) continue;
+            JSONObject interval = result.optJSONObject("interval");
+            if (interval == null) continue;
+            double start = interval.optDouble("startTime", -1.0);
+            double end = interval.optDouble("endTime", -1.0);
+            if (start < 0.0 || end <= start) continue;
+            String type = result.optString("skipType", "").toLowerCase(Locale.US);
+            String label;
+            if ("op".equals(type) || type.startsWith("op") || "mixed-op".equals(type)) label = "OP";
+            else if ("recap".equals(type)) label = "recap";
+            else if ("ed".equals(type) || type.startsWith("ed") || "mixed-ed".equals(type)) label = "credits";
+            else continue;
+            double theirLength = result.optDouble("episodeLength", 0.0);
+            if (hasSegmentType(segments, label) || overlaps(segments, start, end)) continue;
+            segments.add(new Segment(start, end, label, "AniSkip"));
+            logger.log("Segment AniSkip: " + label + " " + fmt3(start) + "s -> " + fmt3(end)
+                    + "s (measured on " + fmt3(theirLength) + "s, our length " + episodeLength + "s, diff "
+                    + (episodeLength > 0 && theirLength > 0 ? fmt3(theirLength - episodeLength) + "s" : "?") + ")");
+        }
     }
 
     private static JSONArray aniSkipResults(int malId, int episode, long episodeLength,
@@ -2493,7 +2605,7 @@ public final class IntroSkipBridge {
 
     private static final Pattern CANDIDATE_SEASON = Pattern.compile(
             "(?i)(?:(\\d+)(?:st|nd|rd|th)\\s+season|season\\s*(\\d+)|(second|third|fourth|fifth)(?:\\s+season)?$"
-            + "|\\s(ii|iii|iv)$)");
+            + "|\\s(ii|iii|iv)(?:\\b|$))");
 
     /**
      * AniList's single best match is not reliable ("Frieren: Beyond Journey's End" returns
@@ -2510,6 +2622,9 @@ public final class IntroSkipBridge {
         if (wanted > 1) {
             searches.add(spaced + " " + ordinalSeason(wanted) + " Season");
             searches.add(spaced + " Season " + wanted);
+            if (wanted == 2) searches.add(spaced + " II");
+            else if (wanted == 3) searches.add(spaced + " III");
+            else if (wanted == 4) searches.add(spaced + " IV");
         }
         Set<Integer> seen = new HashSet<>();
         int bestId = 0;
@@ -2666,7 +2781,13 @@ public final class IntroSkipBridge {
                 for (int i = 0; i < items.length(); i++) {
                     JSONObject item = items.optJSONObject(i);
                     if (item == null) continue;
-                    // start_ms null = from the very beginning of the episode.
+                    // Reject incomplete intro/recap entries with start_ms: null so TheIntroDB never
+                    // fabricates a 0.0s phantom intro or blocks IntroDB.app's real mid-episode intro.
+                    if (item.isNull("start_ms") && ("intro".equals(kind) || "recap".equals(kind))) {
+                        logger.log("IntroDB: skipped " + kind + " with null start_ms (end_ms="
+                                + item.optLong("end_ms", -1L) + ")");
+                        continue;
+                    }
                     double start = item.isNull("start_ms") ? 0.0 : item.optLong("start_ms", -1L) / 1000.0;
                     double end;
                     if (item.isNull("end_ms")) {

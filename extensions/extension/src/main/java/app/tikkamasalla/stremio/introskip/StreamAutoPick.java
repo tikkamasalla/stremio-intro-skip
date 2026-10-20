@@ -182,7 +182,7 @@ public final class StreamAutoPick {
 
     private static void logTop(List<StreamRanker.Ranked> ranked) {
         try {
-            for (int i = 0; i < ranked.size() && i < 3; i++) {
+            for (int i = 0; i < ranked.size() && i < 5; i++) {
                 StreamRanker.Ranked r = ranked.get(i);
                 Log.i(TAG, "rank " + (i + 1) + ": " + r.stream + " | " + r.reason);
             }
@@ -371,25 +371,17 @@ public final class StreamAutoPick {
                         } catch (Throwable ignored) {
                             url = str(u);
                         }
-                    } else {
-                        Object torrent = null;
-                        try {
-                            torrent = s.getClass().getMethod("getTorrent").invoke(s);
-                        } catch (Throwable ignored) {
-                            torrent = null;
-                        }
-                        if (torrent != null) {
-                            try {
-                                url = str(torrent.getClass().getMethod("getInfoHash").invoke(torrent));
-                            } catch (Throwable ignored) {
-                                url = "";
-                            }
-                        }
                     }
+                    // Do not copy torrent infoHash into url: a non-empty url signals a direct
+                    // HTTP/debrid stream in StreamRanker.parse(), whereas getTorrent()-only is P2P.
                 } catch (Throwable ignored) {
                     url = "";
                 }
-                if (!matchesMeta(name + " " + title, metaName)) continue;
+                if (!matchesMeta(name + " " + title, metaName)) {
+                    Log.i(TAG, "drop(meta mismatch vs '" + metaName + "'): ["
+                            + name.replace("\n", " | ") + "] " + title.split("\\r?\\n", 2)[0]);
+                    continue;
+                }
                 out.add(new StreamRanker.Stream(name, title, url, ""));
             } catch (Throwable ignored) {
                 // Skip unusable entries.

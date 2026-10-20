@@ -170,13 +170,13 @@ public final class StreamRanker {
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
     );
 
-    // Cached & Uncached Debrid markers
+    // Cached & Uncached Debrid markers (only explicit [XX download] / uncached, not bare "download")
     private static final Pattern UNCACHED_MARKER_PATTERN = Pattern.compile(
-            "(?:\\[\\s*(?:rd|tb|ad|pm|dl)\\s+download\\s*\\]|\u23F3|" + B_START + "(?:uncached|download)" + B_END + ")",
+            "(?:\\[\\s*(?:rd|tb|ad|pm|dl|oc|ed)\\s+download\\s*\\]|\u23F3|" + B_START + "uncached" + B_END + ")",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
     );
     private static final Pattern CACHED_MARKER_PATTERN = Pattern.compile(
-            "(?:\\[\\s*(?:rd|tb|ad|pm|dl)\\s*\\+\\s*\\]|\u26A1|" + B_START + "(?:cached|instant)" + B_END + ")",
+            "(?:\\[\\s*(?:rd|tb|ad|pm|dl|oc|ed)\\s*\\+\\s*\\]|\u26A1|" + B_START + "(?:cached|instant)" + B_END + ")",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
     );
     private static final Pattern DEBRID_ADDON_PATTERN = Pattern.compile(
@@ -184,9 +184,9 @@ public final class StreamRanker {
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
     );
 
-    // Bad source patterns (longer fused tokens first so CAMRip matches)
+    // Bad source patterns (exclude bare "ts" so .ts containers and [TS] anime typesetting tags are not dropped)
     private static final Pattern BAD_SOURCE_PATTERN = Pattern.compile(
-            B_START + "(hdcams?|camrip|cams?|hdts|tsrip|telesync|ts|telecine|tcrip|tc|screeners?|dvdscr|bdscr|scr|r5|hc|korsub|3d|sample)" + B_END,
+            B_START + "(hdcams?|camrip|cams?|hdts|tsrip|telesync|telecine|tcrip|tc|screeners?|dvdscr|bdscr|scr|r5|korsub|3d|sample)" + B_END,
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
     );
 
@@ -380,10 +380,10 @@ public final class StreamRanker {
             B_START + "(\\d{1,2})x(\\d{2,3})" + B_END,
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     private static final Pattern EP_WORD_PATTERN = Pattern.compile(
-            B_START + "(?:(?:ep(?:isode)?)[\\s._-]?(\\d{1,4})|e(\\d{2,4}))" + B_END,
+            B_START + "(?:(?:ep(?:isode)?)[\\s._-]?(\\d{1,4})|e(\\d{1,4}))" + B_END,
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     private static final Pattern ANIME_EP_PATTERN = Pattern.compile(
-            "(?:^|\\s)-\\s(\\d{2,4})(?:v\\d)?(?=\\s|$|\\[|\\()",
+            "(?:^|[\\s._])-\\s*[._]?(\\d{2,4})(?:v\\d)?(?=[\\s._]|$|\\[|\\()",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     private static final Pattern SEASON_RANGE_PATTERN = Pattern.compile(
             B_START + "(?:seasons?[\\s._-]*|s)(\\d{1,2})(?:\\s*(?:-|~|to|&)\\s*(?:seasons?[\\s._-]*|s)(\\d{1,2})|[-~](\\d{1,2}))" + B_END,
@@ -411,10 +411,13 @@ public final class StreamRanker {
             String name = stream.name != null ? stream.name : "";
             String title = stream.title != null ? stream.title : "";
             int kind = kindOfText(name + "\n" + title, reqSeason, reqEpisode);
-            if (kind == EP_SINGLE || kind == EP_MULTI) {
-                // A pack torrent that lists the wanted file on a later line is still a pack.
-                String first = title.split("\\r?\\n", 2)[0];
-                if (kindOfText(first, reqSeason, reqEpisode) == EP_PACK) {
+            if (kind == EP_SINGLE && title.contains("\n")) {
+                String[] lines = title.split("\\r?\\n", 2);
+                int firstKind = kindOfText(lines[0], reqSeason, reqEpisode);
+                int restKind = kindOfText(lines[1], reqSeason, reqEpisode);
+                // If line 1 is a pack header, keep EP_SINGLE only when the later line itself
+                // explicitly identifies the single target episode (e.g. the selected file in the batch).
+                if (firstKind == EP_PACK && restKind != EP_SINGLE) {
                     return EP_PACK;
                 }
             }
@@ -428,8 +431,9 @@ public final class StreamRanker {
         try {
             // Seen as episode refs: {season or -1, from, to}.
             List<int[]> eps = new ArrayList<int[]>();
-            boolean sawMatch = false;
-            boolean multi = false;
+            boolean sawSingleMatch = false;
+            boolean sawSingleOther = false;
+            boolean sawRangeMatch = false;
 
             Matcher m = SXXEYY_PATTERN.matcher(text);
             StringBuilder rest = new StringBuilder(text);
@@ -496,18 +500,26 @@ public final class StreamRanker {
 
             for (int[] ep : eps) {
                 boolean seasonOk = ep[0] < 0 || reqSeason <= 0 || ep[0] == reqSeason;
-                if (seasonOk && reqEpisode >= ep[1] && reqEpisode <= ep[2]) {
-                    sawMatch = true;
-                    if (ep[2] > ep[1]) {
-                        multi = true;
+                if (ep[2] == ep[1]) {
+                    if (seasonOk && reqEpisode == ep[1]) {
+                        sawSingleMatch = true;
                     } else {
-                        multi = false;
-                        break;
+                        sawSingleOther = true;
                     }
+                } else if (seasonOk && reqEpisode >= ep[1] && reqEpisode <= ep[2]) {
+                    sawRangeMatch = true;
                 }
             }
-            if (sawMatch) {
-                return multi ? EP_MULTI : EP_SINGLE;
+            if (sawSingleMatch) {
+                return EP_SINGLE;
+            }
+            // If an explicit single episode was named and it did not match, reject even if a
+            // pack range on line 1 (e.g. S01E01-25) covered reqEpisode.
+            if (sawSingleOther) {
+                return EP_REJECT;
+            }
+            if (sawRangeMatch) {
+                return EP_MULTI;
             }
             if (!eps.isEmpty()) {
                 return EP_REJECT;
@@ -561,18 +573,28 @@ public final class StreamRanker {
             resolution = 2160;
         }
 
-        // 3. File size check
+        // 3. File size check: if a batch stream lists both a >25 GB pack size and a <=25 GB
+        // episode file size, prefer the episode file size.
         long sizeBytes = 0L;
         String sizeDisplay = "unknown size";
         Matcher diskMatcher = DISK_EMOJI_SIZE_PATTERN.matcher(combined);
-        if (diskMatcher.find()) {
-            sizeBytes = parseSizeToBytes(diskMatcher.group(1), diskMatcher.group(2));
-            sizeDisplay = diskMatcher.group(1) + " " + diskMatcher.group(2).toUpperCase(Locale.ROOT);
-        } else {
+        while (diskMatcher.find()) {
+            long candidateBytes = parseSizeToBytes(diskMatcher.group(1), diskMatcher.group(2));
+            String candidateDisplay = diskMatcher.group(1) + " " + diskMatcher.group(2).toUpperCase(Locale.ROOT);
+            if (sizeBytes == 0L || (sizeBytes > MAX_EPISODE_BYTES && candidateBytes > 0L && candidateBytes <= MAX_EPISODE_BYTES)) {
+                sizeBytes = candidateBytes;
+                sizeDisplay = candidateDisplay;
+            }
+        }
+        if (sizeBytes == 0L) {
             Matcher generalSizeMatcher = GENERAL_SIZE_PATTERN.matcher(combined);
-            if (generalSizeMatcher.find()) {
-                sizeBytes = parseSizeToBytes(generalSizeMatcher.group(1), generalSizeMatcher.group(2));
-                sizeDisplay = generalSizeMatcher.group(1) + " " + generalSizeMatcher.group(2).toUpperCase(Locale.ROOT);
+            while (generalSizeMatcher.find()) {
+                long candidateBytes = parseSizeToBytes(generalSizeMatcher.group(1), generalSizeMatcher.group(2));
+                String candidateDisplay = generalSizeMatcher.group(1) + " " + generalSizeMatcher.group(2).toUpperCase(Locale.ROOT);
+                if (sizeBytes == 0L || (sizeBytes > MAX_EPISODE_BYTES && candidateBytes > 0L && candidateBytes <= MAX_EPISODE_BYTES)) {
+                    sizeBytes = candidateBytes;
+                    sizeDisplay = candidateDisplay;
+                }
             }
         }
 
