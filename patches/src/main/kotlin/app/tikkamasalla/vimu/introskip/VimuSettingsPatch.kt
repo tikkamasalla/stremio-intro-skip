@@ -13,16 +13,60 @@ private const val ENABLED_KEY = "introskip_enabled"
 private const val ANIME_KEY = "introskip_anime"
 private const val MODE_KEY = "introskip_mode"
 private const val RECAPS_KEY = "introskip_recaps"
+private const val AUDIO_PRIMARY_KEY = "introskip_audio_primary"
+private const val AUDIO_ANIME_KEY = "introskip_audio_anime"
 
 private const val MODE_ENTRIES_ARRAY = "introskip_mode_entries"
 private const val MODE_VALUES_ARRAY = "introskip_mode_values"
+private const val AUDIO_LANG_ENTRIES_ARRAY = "introskip_audio_lang_entries"
+private const val AUDIO_LANG_VALUES_ARRAY = "introskip_audio_lang_values"
+
+private val AUDIO_LANG_ENTRIES = listOf(
+    "English",
+    "Japanese",
+    "Spanish",
+    "French",
+    "German",
+    "Italian",
+    "Portuguese",
+    "Russian",
+    "Korean",
+    "Chinese",
+    "Hindi",
+    "Polish",
+    "Turkish",
+    "Arabic",
+    "Dutch",
+    "Ukrainian",
+)
+
+private val AUDIO_LANG_VALUES = listOf(
+    "en",
+    "ja",
+    "es",
+    "fr",
+    "de",
+    "it",
+    "pt",
+    "ru",
+    "ko",
+    "zh",
+    "hi",
+    "pl",
+    "tr",
+    "ar",
+    "nl",
+    "uk",
+)
 
 /**
- * Adds the four Intro Skip preference rows to Vimu Settings:
+ * Adds the six Intro Skip preference rows to Vimu Settings:
  * - Skip intros (CheckBoxPreference, default true)
  * - Skip anime openings (AniSkip) (CheckBoxPreference, default true)
  * - Skip mode (ListPreference: Auto / Manual, default Auto)
  * - Skip recaps (CheckBoxPreference, default true)
+ * - Primary audio language (ListPreference: ISO-639-1, default English / "en")
+ * - Anime audio language (ListPreference: ISO-639-1, default Japanese / "ja")
  *
  * Appends standard Preference rows to res/xml/prefs.xml and the mode arrays to
  * res/values/arrays.xml (falling back to res/values/strings.xml). All rows persist
@@ -44,6 +88,8 @@ val vimuSettingsPatch = resourcePatch(
         valuesDoc.use { doc ->
             ensureStringArray(doc, MODE_ENTRIES_ARRAY, listOf("Auto", "Manual"))
             ensureStringArray(doc, MODE_VALUES_ARRAY, listOf("auto", "manual"))
+            ensureStringArray(doc, AUDIO_LANG_ENTRIES_ARRAY, AUDIO_LANG_ENTRIES)
+            ensureStringArray(doc, AUDIO_LANG_VALUES_ARRAY, AUDIO_LANG_VALUES)
         }
 
         document(PREFS_XML).use { doc ->
@@ -74,18 +120,17 @@ val vimuSettingsPatch = resourcePatch(
             }
 
             if (!hasPreferenceKey(doc, MODE_KEY)) {
-                val modeRow = doc.createElement("ListPreference")
-                modeRow.setAttributeNS(ANDROID_NS, "android:key", MODE_KEY)
-                modeRow.setAttributeNS(ANDROID_NS, "android:title", "Skip mode")
-                modeRow.setAttributeNS(
-                    ANDROID_NS,
-                    "android:summary",
-                    "Auto skips immediately; Manual shows a Skip button",
+                root.appendChild(
+                    createListPreference(
+                        doc = doc,
+                        key = MODE_KEY,
+                        title = "Skip mode",
+                        summary = "Auto skips immediately; Manual shows a Skip button",
+                        entriesArray = MODE_ENTRIES_ARRAY,
+                        valuesArray = MODE_VALUES_ARRAY,
+                        defaultValue = "auto",
+                    ),
                 )
-                modeRow.setAttributeNS(ANDROID_NS, "android:entries", "@array/$MODE_ENTRIES_ARRAY")
-                modeRow.setAttributeNS(ANDROID_NS, "android:entryValues", "@array/$MODE_VALUES_ARRAY")
-                modeRow.setAttributeNS(ANDROID_NS, "android:defaultValue", "auto")
-                root.appendChild(modeRow)
             }
 
             if (!hasPreferenceKey(doc, RECAPS_KEY)) {
@@ -96,6 +141,34 @@ val vimuSettingsPatch = resourcePatch(
                         title = "Skip recaps",
                         summary = "Also skip episode recaps",
                         defaultValue = "true",
+                    ),
+                )
+            }
+
+            if (!hasPreferenceKey(doc, AUDIO_PRIMARY_KEY)) {
+                root.appendChild(
+                    createListPreference(
+                        doc = doc,
+                        key = AUDIO_PRIMARY_KEY,
+                        title = "Primary audio language",
+                        summary = "Preferred audio language for movies and TV shows",
+                        entriesArray = AUDIO_LANG_ENTRIES_ARRAY,
+                        valuesArray = AUDIO_LANG_VALUES_ARRAY,
+                        defaultValue = "en",
+                    ),
+                )
+            }
+
+            if (!hasPreferenceKey(doc, AUDIO_ANIME_KEY)) {
+                root.appendChild(
+                    createListPreference(
+                        doc = doc,
+                        key = AUDIO_ANIME_KEY,
+                        title = "Anime audio language",
+                        summary = "Preferred audio language for anime playback",
+                        entriesArray = AUDIO_LANG_ENTRIES_ARRAY,
+                        valuesArray = AUDIO_LANG_VALUES_ARRAY,
+                        defaultValue = "ja",
                     ),
                 )
             }
@@ -127,6 +200,25 @@ private fun createCheckBox(
     row.setAttributeNS(ANDROID_NS, "android:key", key)
     row.setAttributeNS(ANDROID_NS, "android:title", title)
     row.setAttributeNS(ANDROID_NS, "android:summary", summary)
+    row.setAttributeNS(ANDROID_NS, "android:defaultValue", defaultValue)
+    return row
+}
+
+private fun createListPreference(
+    doc: Document,
+    key: String,
+    title: String,
+    summary: String,
+    entriesArray: String,
+    valuesArray: String,
+    defaultValue: String,
+): Element {
+    val row = doc.createElement("ListPreference")
+    row.setAttributeNS(ANDROID_NS, "android:key", key)
+    row.setAttributeNS(ANDROID_NS, "android:title", title)
+    row.setAttributeNS(ANDROID_NS, "android:summary", summary)
+    row.setAttributeNS(ANDROID_NS, "android:entries", "@array/$entriesArray")
+    row.setAttributeNS(ANDROID_NS, "android:entryValues", "@array/$valuesArray")
     row.setAttributeNS(ANDROID_NS, "android:defaultValue", defaultValue)
     return row
 }

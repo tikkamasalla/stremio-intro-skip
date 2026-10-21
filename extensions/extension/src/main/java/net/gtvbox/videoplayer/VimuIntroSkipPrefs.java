@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.preference.PreferenceManager;
+import java.util.Locale;
 
 /**
  * Settings for the Vimu intro skip. The switches and mode selector live in Vimu
@@ -17,8 +18,12 @@ public final class VimuIntroSkipPrefs {
     public static final String KEY_ANIME = "introskip_anime";
     public static final String KEY_MODE = "introskip_mode";
     public static final String KEY_RECAPS = "introskip_recaps";
+    public static final String KEY_AUDIO_PRIMARY = "introskip_audio_primary";
+    public static final String KEY_AUDIO_ANIME = "introskip_audio_anime";
     public static final String MODE_AUTO = "auto";
     public static final String MODE_MANUAL = "manual";
+    public static final String DEFAULT_AUDIO_PRIMARY = "en";
+    public static final String DEFAULT_AUDIO_ANIME = "ja";
 
     private static final String CACHE_FILE = "vimu_introskip_cache";
     private static final long CACHE_TTL_MS = 60L * 24L * 60L * 60L * 1000L; // 60 days
@@ -103,6 +108,43 @@ public final class VimuIntroSkipPrefs {
 
     public static boolean isManualMode(Context context) {
         return MODE_MANUAL.equals(mode(context));
+    }
+
+    /** Primary audio language as a lowercase ISO-639-1 code (default "en"). */
+    public static String primaryAudioLang(PlayerFragment fragment) {
+        return primaryAudioLang(contextOf(fragment));
+    }
+
+    public static String primaryAudioLang(Context context) {
+        return readIsoLang(context, KEY_AUDIO_PRIMARY, DEFAULT_AUDIO_PRIMARY);
+    }
+
+    /** Anime audio language as a lowercase ISO-639-1 code (default "ja"). */
+    public static String animeAudioLang(PlayerFragment fragment) {
+        return animeAudioLang(contextOf(fragment));
+    }
+
+    public static String animeAudioLang(Context context) {
+        return readIsoLang(context, KEY_AUDIO_ANIME, DEFAULT_AUDIO_ANIME);
+    }
+
+    private static String readIsoLang(Context context, String key, String fallback) {
+        try {
+            if (context == null) return fallback;
+            String raw = prefs(context).getString(key, fallback);
+            if (raw == null) return fallback;
+            String code = raw.trim().toLowerCase(Locale.ROOT);
+            if (code.length() == 2 && isAsciiLower(code.charAt(0)) && isAsciiLower(code.charAt(1))) {
+                return code;
+            }
+            return fallback;
+        } catch (Throwable ignored) {
+            return fallback;
+        }
+    }
+
+    private static boolean isAsciiLower(char c) {
+        return c >= 'a' && c <= 'z';
     }
 
     /** Stored Cinemeta hit for a "series:title" key, or "" (missing or older than 60 days). */

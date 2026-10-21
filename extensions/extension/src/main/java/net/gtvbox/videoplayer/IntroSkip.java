@@ -26,6 +26,11 @@ import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.TextView;
 
+import androidx.media3.common.C;
+import androidx.media3.common.Format;
+import androidx.media3.common.TrackSelectionParameters;
+import androidx.media3.common.Tracks;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -33,6 +38,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -117,6 +123,8 @@ public final class IntroSkip implements Runnable {
     private static volatile WeakReference<Intent> extSource;
 
     private static final WeakHashMap<PlayerFragment, IntroSkip> ACTIVE = new WeakHashMap<>();
+    private static final Map<Object, Boolean> AUDIO_HANDLED =
+            Collections.synchronizedMap(new WeakHashMap<Object, Boolean>());
     private static final Map<String, String> MAL_CACHE = new ConcurrentHashMap<>();
     private static final Object CINEMETA_LOCK = new Object();
     private static final Map<String, String> CINEMETA_CACHE = new ConcurrentHashMap<>();
@@ -185,6 +193,8 @@ public final class IntroSkip implements Runnable {
     private boolean subApplied;
     private int subTries;
     private boolean subLogged;
+    /** Pending preferred-audio selection: applied once tracks are known. */
+    private boolean audioPending = true;
     private boolean chaptersHaveIntro;
     /** Online timestamps (AniSkip or IntroDB) for the episode; used when chapters give no intro. */
     private volatile List<Seg> remote;
@@ -638,6 +648,9 @@ public final class IntroSkip implements Runnable {
         if (p != player) {
             player = p;
             resetMedia();
+        }
+        if (audioPending && duration > 0) {
+            applyPendingAudio(f, p);
         }
         durationMs = duration;
         boolean playingNow = p.isPlaying();
@@ -2460,6 +2473,7 @@ public final class IntroSkip implements Runnable {
 
     private void resetMedia() {
         mediaKind = 0;
+        audioPending = true;
         subApplied = false;
         subTries = 0;
         subLogged = false;
@@ -2530,6 +2544,167 @@ public final class IntroSkip implements Runnable {
      * then position, through Vimu's track API (G0 lists, O0 selects, L reports the current).
      * Retried while the track list is still loading, then left alone.
      */
+    private void applyPendingAudio(PlayerFragment f, e p) {
+        audioPending = false;
+        try {
+            if (f == null || p == null) return;
+            ParsedMedia info = null;
+            try {
+                Activity owner = f.getActivity();
+                if (owner != null) info = extractMediaFromIntent(owner.getIntent());
+            } catch (Throwable ignored) {
+            }
+            // Keep movies untouched if ParsedMedia is null (no episode number parsed).
+            if (info == null) {
+                Log.i(TAG, "AudioSelect: branch=movie-skip (no episode metadata, keeping Vimu default)");
+                return;
+            }
+
+            Object exo = findExoPlayer(p);
+            if (exo == null) return;
+            if (Boolean.TRUE.equals(AUDIO_HANDLED.get(exo))) return;
+
+            Method getParams = exo.getClass().getMethod("getTrackSelectionParameters");
+            Method setParams = exo.getClass().getMethod(
+                    "setTrackSelectionParameters", TrackSelectionParameters.class);
+            Method getTracks = exo.getClass().getMethod("getCurrentTracks");
+
+            TrackSelectionParameters params = (TrackSelectionParameters) getParams.invoke(exo);
+            if (params == null) return;
+
+            // If the user already picked a manual track override, never overwrite it.
+            if (!params.overrides.isEmpty()) {
+                AUDIO_HANDLED.put(exo, Boolean.TRUE);
+                Log.i(TAG, "AudioSelect: branch=manual-skip (existing override active)");
+                return;
+            }
+
+            boolean isAnime = info.looksLikeAnime;
+            String targetIso = isAnime
+                    ? VimuIntroSkipPrefs.animeAudioLang(f)
+                    : VimuIntroSkipPrefs.primaryAudioLang(f);
+            String kind = isAnime ? "anime" : "primary";
+
+            Object tracksObj = getTracks.invoke(exo);
+            if (!(tracksObj instanceof Tracks)) return;
+            Tracks tracks = (Tracks) tracksObj;
+
+            String exactTrackLang = null;
+            String familyTrackLang = null;
+
+            for (Tracks.Group group : tracks.getGroups()) {
+                if (group.getType() != C.TRACK_TYPE_AUDIO) continue;
+                for (int i = 0; i < group.length; i++) {
+                    Format format = group.getTrackFormat(i);
+                    if (format == null || format.language == null) continue;
+                    String rawLang = format.language.trim();
+                    if (rawLang.length() == 0) continue;
+
+                    if (exactTrackLang == null && isExactLangMatch(rawLang, targetIso)) {
+                        exactTrackLang = rawLang;
+                    } else if (familyTrackLang == null && isFamilyLangMatch(rawLang, targetIso)) {
+                        familyTrackLang = rawLang;
+                    }
+                }
+            }
+
+            AUDIO_HANDLED.put(exo, Boolean.TRUE);
+
+            if (exactTrackLang != null) {
+                TrackSelectionParameters updated = params.buildUpon()
+                        .setPreferredAudioLanguage(exactTrackLang)
+                        .build();
+                setParams.invoke(exo, updated);
+                Log.i(TAG, "AudioSelect: branch=preferred kind=" + kind
+                        + " target=" + targetIso + " matched=" + exactTrackLang);
+            } else if (familyTrackLang != null) {
+                TrackSelectionParameters updated = params.buildUpon()
+                        .setPreferredAudioLanguage(familyTrackLang)
+                        .build();
+                setParams.invoke(exo, updated);
+                Log.i(TAG, "AudioSelect: branch=family kind=" + kind
+                        + " target=" + targetIso + " matched=" + familyTrackLang);
+            } else {
+                Log.i(TAG, "AudioSelect: branch=default kind=" + kind
+                        + " target=" + targetIso + " (no matching track, keeping Vimu default)");
+            }
+        } catch (Throwable ignored) {
+            // Fail soft: leave Vimu's default audio selection untouched.
+        }
+    }
+
+    /** Finds the underlying ExoPlayer instance inside Vimu's player wrapper (e / i). */
+    private static Object findExoPlayer(Object playerWrapper) {
+        try {
+            if (playerWrapper == null) return null;
+            if (hasTrackParamsApi(playerWrapper.getClass())) return playerWrapper;
+            for (Class<?> c = playerWrapper.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Field field : c.getDeclaredFields()) {
+                    field.setAccessible(true);
+                    Object value = field.get(playerWrapper);
+                    if (value != null && hasTrackParamsApi(value.getClass())) {
+                        return value;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static boolean hasTrackParamsApi(Class<?> cls) {
+        try {
+            cls.getMethod("getTrackSelectionParameters");
+            cls.getMethod("getCurrentTracks");
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** Tier 1: Exact language code match (e.g. "en" == "en" or ISO-639-2 "eng", without regional tag). */
+    private static boolean isExactLangMatch(String trackLang, String targetIso) {
+        String norm = normalizeLangTag(trackLang);
+        if (norm.indexOf('-') >= 0) return false; // Regional tags like "en-us" belong to Tier 2 (family)
+        return toIso639_1(norm).equals(targetIso);
+    }
+
+    /** Tier 2: Same-language family match (e.g. "en" matches "en-US", "en_GB", "eng-US"). */
+    private static boolean isFamilyLangMatch(String trackLang, String targetIso) {
+        String norm = normalizeLangTag(trackLang);
+        int dash = norm.indexOf('-');
+        String primarySubtag = dash > 0 ? norm.substring(0, dash) : norm;
+        String baseIso = toIso639_1(primarySubtag);
+        if (baseIso.equals(targetIso)) return true;
+        return norm.startsWith(targetIso + "-");
+    }
+
+    private static String normalizeLangTag(String lang) {
+        return lang == null ? "" : lang.trim().replace('_', '-').toLowerCase(Locale.ROOT);
+    }
+
+    /** Maps common 3-letter ISO-639-2/B & T codes found in MKV containers to 2-letter ISO-639-1. */
+    private static String toIso639_1(String code) {
+        if (code == null || code.length() <= 2) return code == null ? "" : code;
+        if ("eng".equals(code)) return "en";
+        if ("jpn".equals(code)) return "ja";
+        if ("spa".equals(code)) return "es";
+        if ("fra".equals(code) || "fre".equals(code)) return "fr";
+        if ("deu".equals(code) || "ger".equals(code)) return "de";
+        if ("ita".equals(code)) return "it";
+        if ("por".equals(code)) return "pt";
+        if ("rus".equals(code)) return "ru";
+        if ("kor".equals(code)) return "ko";
+        if ("zho".equals(code) || "chi".equals(code)) return "zh";
+        if ("hin".equals(code)) return "hi";
+        if ("pol".equals(code)) return "pl";
+        if ("tur".equals(code)) return "tr";
+        if ("ara".equals(code)) return "ar";
+        if ("nld".equals(code) || "dut".equals(code)) return "nl";
+        if ("ukr".equals(code)) return "uk";
+        return code;
+    }
+
     private void applyPendingSub(PlayerFragment f, e p) {
         try {
             Activity owner = f.getActivity();
