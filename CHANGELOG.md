@@ -1,3 +1,9 @@
+## [1.5.0](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.4.1...v1.5.0) (2026-10-21)
+
+### ✨ New Features
+
+* anime-conditional preferred audio language in Vimu ([154c6a2](https://github.com/tikkamasalla/stremio-morphe-patches/commit/154c6a29d4002da000b23603a58a86076a15375c))
+
 ## [1.4.1](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.4.0...v1.4.1) (2026-10-21)
 
 ### 🐛 Bug Fixes

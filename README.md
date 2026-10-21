@@ -61,7 +61,7 @@ Patch your own copy of the Vimu 12.00 APK. Copies that were already modified by 
 The bundle lands in `patches/build/libs/patches-*.mpp`. Apply it with Morphe Desktop.
 
 <!-- PATCHES_START -->
-> **[v1.4.1](https://github.com/tikkamasalla/stremio-morphe-patches/releases/tag/v1.4.1)**&nbsp;&nbsp;•&nbsp;&nbsp;`main`&nbsp;&nbsp;•&nbsp;&nbsp;12 patches total
+> **[v1.5.0](https://github.com/tikkamasalla/stremio-morphe-patches/releases/tag/v1.5.0)**&nbsp;&nbsp;•&nbsp;&nbsp;`main`&nbsp;&nbsp;•&nbsp;&nbsp;12 patches total
 <details open>
 <summary>📦 Stremio&nbsp;&nbsp;•&nbsp;&nbsp;8 patches</summary>
 <br>
