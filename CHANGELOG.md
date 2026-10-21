@@ -1,3 +1,11 @@
+## [1.4.1](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.4.0...v1.4.1) (2026-10-21)
+
+### 🐛 Bug Fixes
+
+* End-guarded chapter patterns, SponsorBlock prefix, Vimu duration cap ([928adb0](https://github.com/tikkamasalla/stremio-morphe-patches/commit/928adb01cf534b52e9c8aa1e18e01537139cc9af))
+* source-agnostic positional sanity and ambiguous chapter drop ([e24d23d](https://github.com/tikkamasalla/stremio-morphe-patches/commit/e24d23dbf906e55d6cf1c7c6e4cddb4681532464))
+* Vimu evicts mislabeled credits, rejects null-start entries ([28f73a9](https://github.com/tikkamasalla/stremio-morphe-patches/commit/28f73a93d788f324098bf29969f9e62a5e1ba1fc))
+
 ## [1.4.0](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.3.0...v1.4.0) (2026-10-20)
 
 ### ✨ New Features
