@@ -39,7 +39,7 @@ Tested on Vimu 12.00. If your copy doesn't patch cleanly, open an issue.
 
 * Movies are never skipped.
 * Only the Stremio 1.6.12 TV flow is tested. Other versions may not hook.
-* File chapters work offline. AniSkip, TheIntroDB and IntroDB.app need internet. No API keys needed.
+* File chapters work offline. AniSkip, TheIntroDB, IntroDB.app and SkipDB need internet. No API keys needed.
 * Lookup order: file chapters, AniSkip for anime, TheIntroDB for shows, IntroDB.app as fallback per segment type, then SkipDB as a final fallback. The IMDb id comes from Stremio's own video id; if that is missing, a keyless Cinemeta name lookup is used and remembered for 60 days.
 * Online timings snap to chapter edges within 15 s. Weak "Intro" chapter names only count when AniSkip, TheIntroDB or IntroDB.app agrees within 15 s, or when none of them has anything for the episode.
 * If the exact seek fails it falls back to a normal seek.
