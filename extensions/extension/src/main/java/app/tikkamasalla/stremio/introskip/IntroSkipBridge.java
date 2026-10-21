@@ -1996,19 +1996,19 @@ public final class IntroSkipBridge {
         return result;
     }
 
-    private static final Pattern CHAPTER_INTRO = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:op\\d*|opening|"
+    private static final Pattern CHAPTER_INTRO = Pattern.compile("(?iu)(?:\\[SponsorBlock\\]:\\s*intro\\b|(?:^|[^\\p{L}])(?:op\\d*|opening|"
             + "abertura|apertura|ouverture|vorspann|g[ée]n[ée]rique(?: de)? d[ée]but|main titles?|"
-            + "title sequence|theme song|вступні титри|опенинг|заставка)(?:$|[^\\p{L}])|オープニング");
+            + "title sequence|theme song|вступні титри|опенинг|заставка)(?![\\s:_-]+end\\b)(?:$|[^\\p{L}])|オープニング)");
     /** "Intro" is the cold open in many fansubs ("Intro" 0-114 s, then "OP"): weak evidence only. */
     private static final Pattern CHAPTER_WEAK_INTRO = Pattern.compile(
-            "(?iu)(?:^|[^\\p{L}])(?:intro|introduction)(?:$|[^\\p{L}])");
-    private static final Pattern CHAPTER_RECAP = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:recap|previously|"
-            + "story so far|r[ée]sum[ée]|resumen|recapitula[çc][ãa]o|r[üu]ckblick|zusammenfassung)(?:$|[^\\p{L}])|あらすじ");
+            "(?iu)(?:^|[^\\p{L}])(?:intro|introduction)(?![\\s:_-]+end\\b)(?:$|[^\\p{L}])");
+    private static final Pattern CHAPTER_RECAP = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:recap|previously(?:\\s+on)?|"
+            + "story so far|r[ée]sum[ée]|resumen|recapitula[çc][ãa]o|r[üu]ckblick|zusammenfassung)(?![\\s:_-]+end\\b)(?:$|[^\\p{L}])|あらすじ");
     private static final Pattern CHAPTER_CREDITS = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:ed\\d*|ending|"
             + "outro|credits|end credits|ending credits|closing credits|end theme|ending theme|"
-            + "encerramento|generique de fin|abspann|кінцеві титри|заключні титри|эндинг)(?:$|[^\\p{L}])|エンディング");
-    private static final Pattern CHAPTER_PREVIEW = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:preview|"
-            + "next episode|trailer|apercu|vorschau|у наступному епізоді|в следующей серии|превью)(?:$|[^\\p{L}])|予告");
+            + "encerramento|generique de fin|abspann|кінцеві титри|заключні титри|эндинг)(?![\\s:_-]+end\\b)(?:$|[^\\p{L}])|エンディング");
+    private static final Pattern CHAPTER_PREVIEW = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:preview|pv|teaser|"
+            + "next episode|trailer|apercu|vorschau|у наступному епізоді|в следующей серии|превью)(?![\\s:_-]+end\\b)(?:$|[^\\p{L}])|予告");
     private static final Pattern CHAPTER_NOT = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:eyecatch)(?:$|[^\\p{L}])");
 
     /** Chapters whose NAME says opening/intro/recap/credits/preview: their exact start/end. */

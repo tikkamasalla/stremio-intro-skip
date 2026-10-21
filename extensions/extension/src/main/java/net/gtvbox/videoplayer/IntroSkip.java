@@ -133,9 +133,10 @@ public final class IntroSkip implements Runnable {
             "(?i)(?:^|[^a-z])intro(?:duction)?(?:[^a-z]|$)");
     private static final Pattern OPENING_NAME = Pattern.compile(
             "(?i)(?:^|[^a-z])(?:" + OPENING_WORDS + ")(?:[^a-z]|$)|オープニング");
-    /** Names that must never be auto-skipped even if they also match the intro words. */
+    /** Names that must never be auto-skipped even if they also match the intro words (includes "Opening End" / "Intro End"). */
     private static final Pattern NEVER_NAME = Pattern.compile(
-            "(?i)(?:^|[^a-z])(?:ed\\d{0,2}|ending|outro|(?:end|ending|closing)\\s+(?:credits?|titles?)|preview|next\\s+episode|eyecatch)(?:[^a-z]|$)");
+            "(?i)(?:^|[^a-z])(?:ed\\d{0,2}|ending|outro|(?:end|ending|closing)\\s+(?:credits?|titles?)|preview|pv|teaser|next\\s+episode|eyecatch)(?:[^a-z]|$)"
+            + "|\\b(?:op\\d{0,2}|opening|intro(?:duction)?|recap|credits?)[\\s:_-]+end\\b");
     /** A bare "Credits" chapter: the opening credits near the start, the end credits near the end. */
     private static final Pattern CREDITS_NAME = Pattern.compile("(?i)(?:^|[^a-z])credits?(?:[^a-z]|$)");
     /** b) names that carry no meaning: "", "Chapter 1", "Chapter 01", "01", "00:01:25.000". */
@@ -2691,7 +2692,8 @@ public final class IntroSkip implements Runnable {
                 continue;
             }
             int end = endOf(starts, i, duration);
-            if (end > starts[i] + 1000) found.add(new Seg((int) starts[i], end, names[i], "name"));
+            long lenMs = (long) end - starts[i];
+            if (lenMs >= 10000L && lenMs <= 360000L) found.add(new Seg((int) starts[i], end, names[i], "name"));
         }
         boolean hasIntroSeg = false;
         for (Seg s : found) {
