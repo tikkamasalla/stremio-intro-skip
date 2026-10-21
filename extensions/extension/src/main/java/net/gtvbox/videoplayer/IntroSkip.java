@@ -1760,8 +1760,17 @@ public final class IntroSkip implements Runnable {
                 JSONArray items = body.optJSONArray(kind);
                 for (int i = 0; items != null && i < items.length(); i++) {
                     JSONObject item = items.getJSONObject(i);
+                    // Reject incomplete intro/recap entries with null start_ms (would fabricate 0.0s).
+                    if (item.isNull("start_ms") && ("intro".equals(kind) || "recap".equals(kind))) {
+                        Log.i(TAG, "IntroDB: skipped " + kind + " with null start_ms");
+                        continue;
+                    }
                     int start = item.isNull("start_ms") ? 0 : item.optInt("start_ms", -1);
                     int end = item.isNull("end_ms") ? -1 : item.optInt("end_ms", -1);
+                    if ("recap".equals(kind) && start <= 500) {
+                        Log.i(TAG, "IntroDB: skipped 0:00 recap (" + start + "ms)");
+                        continue;
+                    }
                     // An entry with no end, or longer than 10 min, would skip the episode itself.
                     if (start < 0 || end <= start || end - start > 600000) continue;
                     if (overlapsMs(out, start, end)) continue;
@@ -1769,16 +1778,48 @@ public final class IntroSkip implements Runnable {
                     out.add(new Seg(start, end, name, "introdb"));
                 }
             }
-            // IntroDB.app fills only the segment types TheIntroDB has nothing for.
+            // IntroDB.app fills only the segment types TheIntroDB has nothing for,
+            // and evicts a mislabeled early "Credits" overlapping its Intro.
             if (isImdbId(id) && info.season > 0 && info.episode > 0
                     && !(hasSegType(out, "Intro") && hasSegType(out, "Recap") && hasSegType(out, "Credits"))) {
                 for (Seg app : fetchIntroDbApp(id, info.season, info.episode)) {
+                    if ("Intro".equals(app.name)) {
+                        for (int i = out.size() - 1; i >= 0; i--) {
+                            Seg existing = out.get(i);
+                            if ("Intro".equals(existing.name) && existing.start <= 500 && app.start > 5000) {
+                                Log.i(TAG, "IntroDB.app: replacing 0:00 IntroDB Intro with mid-episode Intro "
+                                        + app.start + "-" + app.end + "ms");
+                                out.remove(i);
+                            } else if ("Credits".equals(existing.name)
+                                    && Math.min(existing.end, app.end)
+                                    - Math.max(existing.start, app.start) > 1000) {
+                                Log.i(TAG, "IntroDB.app: replacing overlapping IntroDB credits ("
+                                        + existing.start + "-" + existing.end
+                                        + "ms) with Intro " + app.start + "-" + app.end + "ms");
+                                out.remove(i);
+                            }
+                        }
+                    }
                     if (hasSegType(out, app.name)) {
                         Log.i(TAG, "IntroDB.app: skipped " + app.name + ", TheIntroDB already has it");
                         continue;
                     }
                     if (overlapsMs(out, app.start, app.end)) continue;
                     out.add(app);
+                }
+            }
+            // If TheIntroDB mislabeled an opening sequence in the first 40% as "Credits"
+            // with no separate Intro anywhere, promote it to Intro.
+            if (!hasSegType(out, "Intro")) {
+                double maxIntroStart = durationMs > 0 ? durationMs * 0.40 : 300000.0;
+                for (int i = 0; i < out.size(); i++) {
+                    Seg s = out.get(i);
+                    if ("Credits".equals(s.name) && s.start < maxIntroStart
+                            && (durationMs <= 0 || s.end < durationMs * 0.5)) {
+                        out.set(i, new Seg(s.start, s.end, "Intro", s.rule));
+                        Log.i(TAG, "IntroDB: promoted early credits (" + s.start + "-" + s.end + "ms) to Intro");
+                        break;
+                    }
                 }
             }
             // SkipDB fills only the segment types neither source has.
