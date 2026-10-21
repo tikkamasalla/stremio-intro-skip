@@ -245,6 +245,7 @@ public final class IntroSkipBridge {
         private String onlineSource;
         private long onlineStartedAt;
         private String appliedSignature;
+        private String lastSanityLogKey;
         // playback tracking
         private double lastPos = -1;
         private double flowPos = -1;
@@ -383,6 +384,7 @@ public final class IntroSkipBridge {
             onlineSource = null;
             onlineStartedAt = 0;
             appliedSignature = null;
+            lastSanityLogKey = null;
             current = null;
             currentBySeek = false;
             currentByJump = false;
@@ -956,6 +958,7 @@ public final class IntroSkipBridge {
 
         /** Keeps AniSkip first, and fills any missing segment type (e.g. OP) from IntroDB. */
         private void mergeOnline(List<Segment> primary, List<Segment> fallback) {
+            double runtime = runtimeSeconds();
             List<Segment> merged = new ArrayList<>();
             if (primary != null) merged.addAll(primary);
             boolean hadPrimary = !merged.isEmpty();
@@ -977,7 +980,8 @@ public final class IntroSkipBridge {
                             }
                         }
                     }
-                    if (!hasSegmentType(merged, s.label) && !overlaps(merged, s.startSeconds, s.endSeconds)) {
+                    if (!hasUsableSegmentType(merged, s.label, runtime)
+                            && !overlapsBlocking(merged, s)) {
                         merged.add(s);
                     }
                 }
@@ -1036,13 +1040,26 @@ public final class IntroSkipBridge {
          */
         private void combine(long now) {
             boolean waitChapters = chaptersRequested && !chaptersDone && now - chaptersStartedAt < 6000L;
-            List<Segment> named = chapterSegments(chapters, false);
+            final List<String> pendingLogs = new ArrayList<>();
+            DebugLogger combineLogger = new DebugLogger() {
+                @Override
+                public void log(String message) {
+                    pendingLogs.add(message);
+                }
+            };
+            double runtime = runtimeSeconds();
+            List<Segment> named = chapterSegments(chapters, false, combineLogger);
             boolean strongIntro = false;
-            for (Segment segment : named) strongIntro |= !segment.isRecap() && !segment.isCredits() && !segment.isPreview();
+            for (Segment segment : named) {
+                if (!segment.isRecap() && !segment.isCredits() && !segment.isPreview()
+                        && isSaneForCoverage(segment, runtime)) {
+                    strongIntro = true;
+                }
+            }
             if (!strongIntro && online != null && !waitChapters) {
                 // A weak "Intro" chapter only counts if an online source agrees within 15 s
                 // (never when online is empty, as fansubs often name the 0:00 cold open "Intro").
-                for (Segment weak : chapterSegments(chapters, true)) {
+                for (Segment weak : chapterSegments(chapters, true, combineLogger)) {
                     boolean confirmed = false;
                     for (Segment o : online) {
                         if (!o.isRecap() && !o.isCredits() && !o.isPreview()
@@ -1055,23 +1072,28 @@ public final class IntroSkipBridge {
                     if (confirmed) {
                         named.add(weak);
                     } else {
-                        log("Weak chapter ignored (no online match within 15s): "
+                        pendingLogs.add("Weak chapter ignored (no online match within 15s): "
                                 + fmt3(weak.startSeconds) + "-" + fmt3(weak.endSeconds));
                     }
                 }
             }
-            if (named.isEmpty() && (online == null || waitChapters)) return;
+            if (named.isEmpty() && (online == null || waitChapters)) {
+                flushCombineLogs(pendingLogs, "wait|" + waitChapters + "|c"
+                        + (chapters == null ? -1 : chapters.size()));
+                return;
+            }
             boolean namedIntro = false;
             boolean namedRecap = false;
             boolean namedCredits = false;
             boolean namedPreview = false;
             for (Segment segment : named) {
+                if (!isSaneForCoverage(segment, runtime)) continue;
                 if (segment.isRecap()) namedRecap = true;
                 else if (segment.isCredits()) namedCredits = true;
                 else if (segment.isPreview()) namedPreview = true;
                 else namedIntro = true;
             }
-            List<Segment> out = new ArrayList<>(named);
+            List<Segment> merged = new ArrayList<>(named);
             if (online != null && !waitChapters) {
                 for (Segment segment : online) {
                     boolean covered;
@@ -1080,16 +1102,53 @@ public final class IntroSkipBridge {
                     else if (segment.isPreview()) covered = namedPreview;
                     else covered = namedIntro;
                     if (covered) continue;
-                    Segment snapped = snap(segment, chapters);
-                    if (!overlaps(out, snapped.startSeconds, snapped.endSeconds)) out.add(snapped);
+                    merged.add(segment);
+                }
+            }
+            // Source-agnostic positional + duration sanity on the merged list before snap().
+            positionalSanity(merged, runtime, combineLogger);
+
+            List<Segment> out = new ArrayList<>();
+            for (Segment segment : merged) {
+                Segment candidate = segment.source.startsWith("chapter ")
+                        ? segment : snap(segment, chapters);
+                if (!overlaps(out, candidate.startSeconds, candidate.endSeconds)) {
+                    out.add(candidate);
                 }
             }
             StringBuilder signature = new StringBuilder();
             for (Segment segment : out) signature.append(segment.key()).append(segment.source).append(';');
-            if (signature.toString().equals(appliedSignature)) return;
-            appliedSignature = signature.toString();
+            String sig = signature.toString();
+            flushCombineLogs(pendingLogs, sig + "|c" + (chapters == null ? -1 : chapters.size())
+                    + "|o" + (online == null ? -1 : online.size()) + "|r" + Math.round(runtime));
+            if (sig.equals(appliedSignature)) return;
+            appliedSignature = sig;
             apply(out, onlineSource == null ? "chapters" : onlineSource, onlineStartedAt == 0
                     ? chaptersStartedAt : onlineStartedAt);
+        }
+
+        private double runtimeSeconds() {
+            if (fetchedLength > 0) return fetchedLength;
+            if (player != null) {
+                try {
+                    long durationMs = player.getDuration();
+                    if (durationMs > 0) return durationMs / 1000.0;
+                } catch (Throwable ignored) {
+                }
+            }
+            double maxEnd = 0;
+            if (chapters != null) {
+                for (MkvChapters.Chapter c : chapters) {
+                    if (c != null && c.end > maxEnd) maxEnd = c.end;
+                }
+            }
+            return maxEnd;
+        }
+
+        private void flushCombineLogs(List<String> messages, String key) {
+            if (key.equals(lastSanityLogKey)) return;
+            lastSanityLogKey = key;
+            for (String message : messages) log(message);
         }
 
         private void apply(List<Segment> found, String source, long startedAt) {
@@ -1953,14 +2012,19 @@ public final class IntroSkipBridge {
     private static final Pattern CHAPTER_NOT = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:eyecatch)(?:$|[^\\p{L}])");
 
     /** Chapters whose NAME says opening/intro/recap/credits/preview: their exact start/end. */
-    private static List<Segment> chapterSegments(List<MkvChapters.Chapter> chapters, boolean weak) {
+    private static List<Segment> chapterSegments(List<MkvChapters.Chapter> chapters, boolean weak,
+                                                 DebugLogger logger) {
         List<Segment> out = new ArrayList<>();
-        if (chapters == null) return out;
+        if (chapters == null || chapters.isEmpty()) return out;
         double runtime = 0;
         for (MkvChapters.Chapter c : chapters) {
             if (c != null && c.end > runtime) runtime = c.end;
         }
-        for (MkvChapters.Chapter chapter : chapters) {
+        int n = chapters.size();
+        Segment[] matched = new Segment[n];
+        for (int i = 0; i < n; i++) {
+            MkvChapters.Chapter chapter = chapters.get(i);
+            if (chapter == null) continue;
             double length = chapter.end - chapter.start;
             // A label, not a scene description ("Mike Takes His Leave of the Crew, Opening Credits").
             if (chapter.end <= 0 || CHAPTER_NOT.matcher(chapter.name).find()
@@ -1972,13 +2036,32 @@ public final class IntroSkipBridge {
             boolean allowCredits = !(lower.contains("opening") || lower.contains("main title")
                     || (lower.contains("credits") && (runtime <= 0 || chapter.start < runtime * 0.25)));
             if (intro && length >= 15 && length <= 240) {
-                out.add(new Segment(chapter.start, chapter.end, "OP", "chapter \"" + chapter.name + "\""));
+                matched[i] = new Segment(chapter.start, chapter.end, "OP", "chapter \"" + chapter.name + "\"");
             } else if (!weak && CHAPTER_RECAP.matcher(chapter.name).find() && length >= 10 && length <= 360) {
-                out.add(new Segment(chapter.start, chapter.end, "recap", "chapter \"" + chapter.name + "\""));
+                matched[i] = new Segment(chapter.start, chapter.end, "recap", "chapter \"" + chapter.name + "\"");
             } else if (!weak && allowCredits && CHAPTER_CREDITS.matcher(chapter.name).find() && length >= 15 && length <= 480) {
-                out.add(new Segment(chapter.start, chapter.end, "credits", "chapter \"" + chapter.name + "\""));
+                matched[i] = new Segment(chapter.start, chapter.end, "credits", "chapter \"" + chapter.name + "\"");
             } else if (!weak && CHAPTER_PREVIEW.matcher(chapter.name).find() && length >= 10 && length <= 300) {
-                out.add(new Segment(chapter.start, chapter.end, "preview", "chapter \"" + chapter.name + "\""));
+                matched[i] = new Segment(chapter.start, chapter.end, "preview", "chapter \"" + chapter.name + "\"");
+            }
+        }
+        boolean[] ambiguous = new boolean[n];
+        for (int i = 0; i + 1 < n; i++) {
+            Segment a = matched[i];
+            Segment b = matched[i + 1];
+            if (a != null && b != null && a.label.equals(b.label)
+                    && ("OP".equals(a.label) || "credits".equals(a.label))) {
+                ambiguous[i] = true;
+                ambiguous[i + 1] = true;
+                if (logger != null) {
+                    logger.log("Ambiguous chapters dropped: \"" + chapters.get(i).name
+                            + "\" + \"" + chapters.get(i + 1).name + "\"");
+                }
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            if (matched[i] != null && !ambiguous[i]) {
+                out.add(matched[i]);
             }
         }
         return out;
@@ -2676,7 +2759,8 @@ public final class IntroSkipBridge {
             else if ("ed".equals(type) || type.startsWith("ed") || "mixed-ed".equals(type)) label = "credits";
             else continue;
             double theirLength = result.optDouble("episodeLength", 0.0);
-            if (hasSegmentType(segments, label) || overlaps(segments, start, end)) continue;
+            if (hasUsableSegmentType(segments, label, episodeLength)
+                    || overlapsBlocking(segments, new Segment(start, end, label, "AniSkip"))) continue;
             segments.add(new Segment(start, end, label, "AniSkip"));
             logger.log("Segment AniSkip: " + label + " " + fmt3(start) + "s -> " + fmt3(end)
                     + "s (measured on " + fmt3(theirLength) + "s, our length " + episodeLength + "s, diff "
@@ -2890,8 +2974,8 @@ public final class IntroSkipBridge {
                     } else {
                         end = item.optLong("end_ms", -1L) / 1000.0;
                     }
-                    // An intro/recap with no end is unusable (it would skip the episode).
-                    if (start < 0.0 || end <= start || end - start > 600) continue;
+                    // Duration sanity is unified in positionalSanity(); keep everything orderable here.
+                    if (start < 0.0 || end <= start) continue;
                     String label;
                     if ("intro".equals(kind)) label = "OP";
                     else if ("recap".equals(kind)) label = "recap";
@@ -2906,9 +2990,9 @@ public final class IntroSkipBridge {
                     logger.log("Segment IntroDB: " + kind + " " + start + "s -> " + end + "s");
                 }
             }
-            // IntroDB.app fills missing segment types, replaces a 0.0s TheIntroDB OP when
-            // IntroDB.app has a mid-episode OP (startSeconds > 5.0s), and evicts any
-            // mislabeled TheIntroDB "credits" that overlaps IntroDB.app's OP.
+            // IntroDB.app fills missing segment types and replaces a 0.0s TheIntroDB OP when
+            // IntroDB.app has a mid-episode OP (startSeconds > 5.0s); overlapping early credits
+            // are evicted by positionalSanity() in combine().
             if (isImdbId(id) && season > 0 && episode > 0) {
                 for (Segment app : fetchIntroDbApp(id, season, episode, logger)) {
                     if ("OP".equals(app.label)) {
@@ -2918,21 +3002,14 @@ public final class IntroSkipBridge {
                                 logger.log("IntroDB.app: replacing 0:00 IntroDB OP with mid-episode OP "
                                         + app.startSeconds + "s -> " + app.endSeconds + "s");
                                 out.remove(i);
-                            } else if ("credits".equals(existing.label)
-                                    && Math.min(existing.endSeconds, app.endSeconds)
-                                    - Math.max(existing.startSeconds, app.startSeconds) > 1.0) {
-                                logger.log("IntroDB.app: replacing overlapping IntroDB credits ("
-                                        + existing.startSeconds + "s -> " + existing.endSeconds
-                                        + "s) with OP " + app.startSeconds + "s -> " + app.endSeconds + "s");
-                                out.remove(i);
                             }
                         }
                     }
-                    if (hasSegmentType(out, app.label)) {
+                    if (hasUsableSegmentType(out, app.label, episodeLength)) {
                         logger.log("IntroDB.app: skipped " + app.label + ", TheIntroDB already has it");
                         continue;
                     }
-                    if (overlaps(out, app.startSeconds, app.endSeconds)) {
+                    if (overlapsBlocking(out, app)) {
                         logger.log("IntroDB.app: duplicate skipped (" + app.label + " " + app.startSeconds + "s)");
                         continue;
                     }
@@ -2943,14 +3020,26 @@ public final class IntroSkipBridge {
             }
             // SkipDB fills segment types none of the earlier sources has.
             if (isImdbId(id) && season > 0 && episode > 0
-                    && !(hasSegmentType(out, "OP") && hasSegmentType(out, "recap")
-                    && hasSegmentType(out, "credits") && hasSegmentType(out, "preview"))) {
+                    && !(hasUsableSegmentType(out, "OP", episodeLength)
+                    && hasUsableSegmentType(out, "recap", episodeLength)
+                    && hasUsableSegmentType(out, "credits", episodeLength)
+                    && hasUsableSegmentType(out, "preview", episodeLength))) {
                 for (Segment s : fetchSkipDb(id, season, episode, episodeLength, logger)) {
-                    if (hasSegmentType(out, s.label)) {
+                    if ("OP".equals(s.label)) {
+                        for (int i = out.size() - 1; i >= 0; i--) {
+                            Segment existing = out.get(i);
+                            if ("OP".equals(existing.label) && existing.startSeconds <= 0.5 && s.startSeconds > 5.0) {
+                                logger.log("SkipDB: replacing 0:00 IntroDB OP with mid-episode OP "
+                                        + s.startSeconds + "s -> " + s.endSeconds + "s");
+                                out.remove(i);
+                            }
+                        }
+                    }
+                    if (hasUsableSegmentType(out, s.label, episodeLength)) {
                         logger.log("SkipDB: skipped " + s.label + ", already have it");
                         continue;
                     }
-                    if (overlaps(out, s.startSeconds, s.endSeconds)) {
+                    if (overlapsBlocking(out, s)) {
                         logger.log("SkipDB: duplicate skipped (" + s.label + " " + s.startSeconds + "s)");
                         continue;
                     }
@@ -2958,10 +3047,10 @@ public final class IntroSkipBridge {
                     logger.log("Segment SkipDB: " + s.label + " " + s.startSeconds + "s -> " + s.endSeconds + "s");
                 }
             }
-            // If TheIntroDB mislabeled an opening sequence in the first 35% of the episode as
-            // "credits" and neither source provided a separate OP, promote it to OP.
-            if (!hasSegmentType(out, "OP")) {
-                double maxIntroStart = episodeLength > 0 ? episodeLength * 0.35 : 300.0;
+            // If TheIntroDB is the only source with data and mislabeled an opening sequence in the
+            // first 40% of the episode as "credits" with no separate OP anywhere, promote it to OP.
+            if (!hasUsableSegmentType(out, "OP", episodeLength)) {
+                double maxIntroStart = episodeLength > 0 ? episodeLength * 0.40 : 300.0;
                 for (int i = 0; i < out.size(); i++) {
                     Segment s = out.get(i);
                     if ("credits".equals(s.label) && s.startSeconds < maxIntroStart
@@ -3168,7 +3257,7 @@ public final class IntroSkipBridge {
             } else {
                 return;
             }
-            if (start < 0.0 || end <= start || end - start > 600) return;
+            if (start < 0.0 || end <= start) return;
             out.add(new Segment(start, end, label, "IntroDB.app"));
         } catch (Exception error) {
             logger.log("ERROR IntroDB.app (" + key + "): " + error.getClass().getSimpleName());
@@ -3212,7 +3301,7 @@ public final class IntroSkipBridge {
             }
             double start = item.isNull("start_ms") ? -1.0 : item.optLong("start_ms", -1L) / 1000.0;
             double end = item.isNull("end_ms") ? -1.0 : item.optLong("end_ms", -1L) / 1000.0;
-            if (start < 0.0 || end <= start || end - start > 600) return;
+            if (start < 0.0 || end <= start) return;
             out.add(new Segment(start, end, label, "SkipDB"));
         } catch (Exception error) {
             logger.log("ERROR SkipDB (" + key + "): " + error.getClass().getSimpleName());
@@ -3372,6 +3461,96 @@ public final class IntroSkipBridge {
             if (end - start > 1.0) return true;
         }
         return false;
+    }
+
+    private static boolean isSaneForCoverage(Segment s, double runtime) {
+        if (s == null || s.endSeconds <= s.startSeconds) return false;
+        if (!s.isPreview() && s.endSeconds - s.startSeconds > 600.0) return false;
+        if ("OP".equals(s.label) && runtime > 0 && s.startSeconds > runtime * 0.60) return false;
+        return true;
+    }
+
+    private static boolean hasUsableSegmentType(List<Segment> segments, String label, double runtime) {
+        for (Segment segment : segments) {
+            if (segment.label.equals(label) && isSaneForCoverage(segment, runtime)) return true;
+        }
+        return false;
+    }
+
+    /** Allows an OP candidate through when the only overlap in the list is a credits segment. */
+    private static boolean overlapsBlocking(List<Segment> segments, Segment candidate) {
+        for (Segment segment : segments) {
+            if ("OP".equals(candidate.label) && segment.isCredits()) continue;
+            double start = Math.max(segment.startSeconds, candidate.startSeconds);
+            double end = Math.min(segment.endSeconds, candidate.endSeconds);
+            if (end - start > 1.0) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Source-agnostic positional and duration sanity applied to the merged candidate list
+     * before chapter snapping:
+     * 1. Drop OP/recap/credits blocks longer than 600 s (10 min).
+     * 2. Drop OP segments starting after 60% of runtime (0.0 s anime cold opens survive).
+     * 3. Drop credits segments starting before 40% of runtime when they overlap an OP.
+     */
+    private static void positionalSanity(List<Segment> segments, double runtime, DebugLogger logger) {
+        if (segments == null || segments.isEmpty()) return;
+        // 1. Unified >10 min (600 s) duration sanity for intro/recap/credits.
+        for (int i = segments.size() - 1; i >= 0; i--) {
+            Segment s = segments.get(i);
+            double duration = s.endSeconds - s.startSeconds;
+            if (!s.isPreview() && duration > 600.0) {
+                segments.remove(i);
+                if (logger != null) {
+                    logger.log("Positional sanity dropped " + s.label + " "
+                            + fmt3(s.startSeconds) + "-" + fmt3(s.endSeconds)
+                            + " (duration " + fmt(duration) + "s > 600s)");
+                }
+            }
+        }
+        // 2. Late OP (>60% of runtime) sanity; anime 0.0 s cold opens and >60% end credits survive.
+        if (runtime > 0) {
+            double maxOpStart = runtime * 0.60;
+            for (int i = segments.size() - 1; i >= 0; i--) {
+                Segment s = segments.get(i);
+                if ("OP".equals(s.label) && s.startSeconds > maxOpStart) {
+                    segments.remove(i);
+                    if (logger != null) {
+                        logger.log("Positional sanity dropped OP "
+                                + fmt3(s.startSeconds) + "-" + fmt3(s.endSeconds)
+                                + " (start " + fmt(s.startSeconds / runtime * 100.0)
+                                + "% > 60% of runtime " + fmt(runtime) + "s)");
+                    }
+                }
+            }
+        }
+        // 3. Early credits (<40% of runtime) overlapping an OP: drop credits, keep OP.
+        double earlyCreditsLimit = runtime > 0 ? runtime * 0.40 : 480.0;
+        for (int i = segments.size() - 1; i >= 0; i--) {
+            Segment s = segments.get(i);
+            if (!s.isCredits() || s.startSeconds >= earlyCreditsLimit) continue;
+            Segment overlappingOp = null;
+            for (Segment other : segments) {
+                if (!"OP".equals(other.label)) continue;
+                double overlap = Math.min(s.endSeconds, other.endSeconds)
+                        - Math.max(s.startSeconds, other.startSeconds);
+                if (overlap > 1.0) {
+                    overlappingOp = other;
+                    break;
+                }
+            }
+            if (overlappingOp != null) {
+                segments.remove(i);
+                if (logger != null) {
+                    logger.log("Positional sanity dropped credits "
+                            + fmt3(s.startSeconds) + "-" + fmt3(s.endSeconds)
+                            + " (early credits < 40% overlapping OP "
+                            + fmt3(overlappingOp.startSeconds) + "-" + fmt3(overlappingOp.endSeconds) + ")");
+                }
+            }
+        }
     }
 
     private static String ordinalSeason(int season) {
