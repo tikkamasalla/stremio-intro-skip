@@ -13,11 +13,15 @@ private const val ENABLED_KEY = "introskip_enabled"
 private const val ANIME_KEY = "introskip_anime"
 private const val MODE_KEY = "introskip_mode"
 private const val RECAPS_KEY = "introskip_recaps"
+private const val CREDITS_KEY = "introskip_credits"
+private const val PREVIEWS_KEY = "introskip_previews"
 private const val AUDIO_PRIMARY_KEY = "introskip_audio_primary"
 private const val AUDIO_ANIME_KEY = "introskip_audio_anime"
 
 private const val MODE_ENTRIES_ARRAY = "introskip_mode_entries"
 private const val MODE_VALUES_ARRAY = "introskip_mode_values"
+private const val CREDITS_ENTRIES_ARRAY = "introskip_credits_entries"
+private const val CREDITS_VALUES_ARRAY = "introskip_credits_values"
 private const val AUDIO_LANG_ENTRIES_ARRAY = "introskip_audio_lang_entries"
 private const val AUDIO_LANG_VALUES_ARRAY = "introskip_audio_lang_values"
 
@@ -60,11 +64,13 @@ private val AUDIO_LANG_VALUES = listOf(
 )
 
 /**
- * Adds the six Intro Skip preference rows to Vimu Settings:
+ * Adds the eight Intro Skip preference rows to Vimu Settings:
  * - Skip intros (CheckBoxPreference, default true)
  * - Skip anime openings (AniSkip) (CheckBoxPreference, default true)
  * - Skip mode (ListPreference: Auto / Manual, default Auto)
  * - Skip recaps (CheckBoxPreference, default true)
+ * - Skip credits (ListPreference: Auto / Button / Off, default Button)
+ * - Skip previews (CheckBoxPreference, default false)
  * - Primary audio language (ListPreference: ISO-639-1, default English / "en")
  * - Anime audio language (ListPreference: ISO-639-1, default Japanese / "ja")
  *
@@ -88,6 +94,8 @@ val vimuSettingsPatch = resourcePatch(
         valuesDoc.use { doc ->
             ensureStringArray(doc, MODE_ENTRIES_ARRAY, listOf("Auto", "Manual"))
             ensureStringArray(doc, MODE_VALUES_ARRAY, listOf("auto", "manual"))
+            ensureStringArray(doc, CREDITS_ENTRIES_ARRAY, listOf("Auto", "Button", "Off"))
+            ensureStringArray(doc, CREDITS_VALUES_ARRAY, listOf("auto", "button", "off"))
             ensureStringArray(doc, AUDIO_LANG_ENTRIES_ARRAY, AUDIO_LANG_ENTRIES)
             ensureStringArray(doc, AUDIO_LANG_VALUES_ARRAY, AUDIO_LANG_VALUES)
         }
@@ -141,6 +149,32 @@ val vimuSettingsPatch = resourcePatch(
                         title = "Skip recaps",
                         summary = "Also skip episode recaps",
                         defaultValue = "true",
+                    ),
+                )
+            }
+
+            if (!hasPreferenceKey(doc, CREDITS_KEY)) {
+                root.appendChild(
+                    createListPreference(
+                        doc = doc,
+                        key = CREDITS_KEY,
+                        title = "Skip credits",
+                        summary = "Auto skips immediately; Button shows a Skip button; Off disables",
+                        entriesArray = CREDITS_ENTRIES_ARRAY,
+                        valuesArray = CREDITS_VALUES_ARRAY,
+                        defaultValue = "button",
+                    ),
+                )
+            }
+
+            if (!hasPreferenceKey(doc, PREVIEWS_KEY)) {
+                root.appendChild(
+                    createCheckBox(
+                        doc = doc,
+                        key = PREVIEWS_KEY,
+                        title = "Skip previews",
+                        summary = "Skip preview segments too",
+                        defaultValue = "false",
                     ),
                 )
             }
