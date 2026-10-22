@@ -18,10 +18,15 @@ public final class VimuIntroSkipPrefs {
     public static final String KEY_ANIME = "introskip_anime";
     public static final String KEY_MODE = "introskip_mode";
     public static final String KEY_RECAPS = "introskip_recaps";
+    public static final String KEY_CREDITS = "introskip_credits";
+    public static final String KEY_PREVIEWS = "introskip_previews";
     public static final String KEY_AUDIO_PRIMARY = "introskip_audio_primary";
     public static final String KEY_AUDIO_ANIME = "introskip_audio_anime";
     public static final String MODE_AUTO = "auto";
     public static final String MODE_MANUAL = "manual";
+    public static final String CREDITS_AUTO = "auto";
+    public static final String CREDITS_BUTTON = "button";
+    public static final String CREDITS_OFF = "off";
     public static final String DEFAULT_AUDIO_PRIMARY = "en";
     public static final String DEFAULT_AUDIO_ANIME = "ja";
 
@@ -108,6 +113,39 @@ public final class VimuIntroSkipPrefs {
 
     public static boolean isManualMode(Context context) {
         return MODE_MANUAL.equals(mode(context));
+    }
+
+    /** Credits behavior: "auto", "button" (default), or "off". */
+    public static String creditsMode(PlayerFragment fragment) {
+        return creditsMode(contextOf(fragment));
+    }
+
+    public static String creditsMode(Context context) {
+        try {
+            if (context == null) return CREDITS_BUTTON;
+            String raw = prefs(context).getString(KEY_CREDITS, CREDITS_BUTTON);
+            if (raw == null) return CREDITS_BUTTON;
+            String val = raw.trim();
+            if (CREDITS_AUTO.equalsIgnoreCase(val)) return CREDITS_AUTO;
+            if (CREDITS_OFF.equalsIgnoreCase(val)) return CREDITS_OFF;
+            return CREDITS_BUTTON;
+        } catch (Throwable ignored) {
+            return CREDITS_BUTTON;
+        }
+    }
+
+    /** False unless the user turned "Skip previews" on in Vimu Settings. */
+    public static boolean isPreviewsEnabled(PlayerFragment fragment) {
+        return isPreviewsEnabled(contextOf(fragment));
+    }
+
+    public static boolean isPreviewsEnabled(Context context) {
+        try {
+            if (context == null) return false;
+            return prefs(context).getBoolean(KEY_PREVIEWS, false);
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     /** Primary audio language as a lowercase ISO-639-1 code (default "en"). */

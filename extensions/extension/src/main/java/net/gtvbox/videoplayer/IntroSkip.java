@@ -270,15 +270,22 @@ public final class IntroSkip implements Runnable {
             return "Credits".equals(name) && rule != null && rule.startsWith("introdb");
         }
 
+        /** Only the online "Preview" segments (SkipDB): never chapters. */
+        boolean preview() {
+            return "Preview".equals(name);
+        }
+
         String buttonText() {
             if (recap()) return "Skip recap (OK)";
             if (credits()) return "Skip credits (OK)";
+            if (preview()) return "Skip preview (OK)";
             return "Skip intro (OK)";
         }
 
         String skippedText() {
             if (recap()) return "Recap skipped";
             if (credits()) return "Credits skipped";
+            if (preview()) return "Preview skipped";
             return "Intro skipped";
         }
     }
@@ -758,10 +765,15 @@ public final class IntroSkip implements Runnable {
 
         boolean recaps = VimuIntroSkipPrefs.isRecapsEnabled(f);
         boolean manualMode = VimuIntroSkipPrefs.isManualMode(f);
+        boolean previewsOn = VimuIntroSkipPrefs.isPreviewsEnabled(f);
+        String creditsMode = VimuIntroSkipPrefs.creditsMode(activity);
+        boolean creditsOffPref = VimuIntroSkipPrefs.CREDITS_OFF.equals(creditsMode);
 
         Seg seg = null;
         for (Seg s : segments) {
             if (!recaps && s.recap()) continue;
+            if (!previewsOn && s.preview()) continue;
+            if (creditsOffPref && s.credits()) continue;
             if (pos >= s.start && pos < s.end - 400) {
                 seg = s;
                 break;
@@ -788,10 +800,17 @@ public final class IntroSkip implements Runnable {
         // Seeking before the decoder is really producing frames (the position still sits on the
         // resume point) crashed ExoPlayer natively on the TV, so wait for 4 polls of steady advance.
         boolean flowing = flowTicks >= 4;
-        // Credits are never auto-skipped: button only.
-        boolean buttonOnly = seg != null && seg.credits();
-        boolean autoPending = seg != null && !manualMode && !currentBySeek && !buttonOnly
-                && !skipped.contains(seg.key());
+        boolean isCredits = seg != null && seg.credits();
+        boolean isPreview = seg != null && seg.preview();
+        boolean creditsOff = isCredits && VimuIntroSkipPrefs.CREDITS_OFF.equals(creditsMode);
+        boolean previewsOff = isPreview && !previewsOn;
+        boolean buttonOnly = (isCredits && VimuIntroSkipPrefs.CREDITS_BUTTON.equals(creditsMode))
+                || previewsOff;
+        boolean autoModeForSeg = isCredits
+                ? VimuIntroSkipPrefs.CREDITS_AUTO.equals(creditsMode)
+                : !manualMode && !previewsOff;
+        boolean autoPending = seg != null && !creditsOff && !previewsOff && autoModeForSeg
+                && !currentBySeek && !skipped.contains(seg.key());
         if (autoPending && playing && flowing) {
             hidePill(false);
             skip(f, p, seg, pos, true);
@@ -801,6 +820,8 @@ public final class IntroSkip implements Runnable {
             // 200 ms polling would show up to 0.2 s of the intro: re-check right at its start.
             for (Seg s : segments) {
                 if (!recaps && s.recap()) continue;
+                if (!previewsOn && s.preview()) continue;
+                if (creditsOffPref && s.credits()) continue;
                 int ahead = s.start - pos;
                 if (ahead > 0 && ahead <= POLL_MS + 50 && (manualMode || !skipped.contains(s.key()))) {
                     MAIN.removeCallbacks(precise);
@@ -810,7 +831,8 @@ public final class IntroSkip implements Runnable {
             }
         }
 
-        boolean shouldShowPill = seg != null && playing && (manualMode || currentBySeek || buttonOnly) && !autoPending;
+        boolean shouldShowPill = seg != null && !creditsOff && !previewsOff && playing
+                && (!autoModeForSeg || currentBySeek || buttonOnly) && !autoPending;
         if (shouldShowPill) {
             if (pillSegment != seg || !pillShown) {
                 showButton(f, activity, seg);
@@ -1835,9 +1857,10 @@ public final class IntroSkip implements Runnable {
                     }
                 }
             }
-            // SkipDB fills only the segment types neither source has.
+            // SkipDB fills only the segment types neither source has (previews included).
             if (isImdbId(id) && info.season > 0 && info.episode > 0
-                    && !(hasSegType(out, "Intro") && hasSegType(out, "Recap") && hasSegType(out, "Credits"))) {
+                    && !(hasSegType(out, "Intro") && hasSegType(out, "Recap") && hasSegType(out, "Credits")
+                    && hasSegType(out, "Preview"))) {
                 for (Seg s : fetchSkipDb(id, info.season, info.episode, durationMs)) {
                     if (hasSegType(out, s.name)) {
                         continue;
@@ -2066,6 +2089,7 @@ public final class IntroSkip implements Runnable {
             addSkipDbSegment(out, segments, "intro", "Intro");
             addSkipDbSegment(out, segments, "recap", "Recap");
             addSkipDbSegment(out, segments, "outro", "Credits");
+            addSkipDbSegment(out, segments, "preview", "Preview");
         } catch (Throwable error) {
             Log.w(TAG, "SkipDB lookup failed: " + error);
         }
