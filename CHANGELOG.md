@@ -1,3 +1,10 @@
+## [1.6.0](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.5.0...v1.6.0) (2026-10-22)
+
+### ✨ New Features
+
+* Vimu credits auto/button/off and preview support ([92509e8](https://github.com/tikkamasalla/stremio-morphe-patches/commit/92509e8d63f483c45997a6fbdad2d1874da409c2))
+* Vimu credits auto/button/off and preview support ([a610113](https://github.com/tikkamasalla/stremio-morphe-patches/commit/a610113b0f90c693e069afa190351586dafc1532))
+
 ## [1.5.0](https://github.com/tikkamasalla/stremio-morphe-patches/compare/v1.4.1...v1.5.0) (2026-10-21)
 
 ### ✨ New Features
