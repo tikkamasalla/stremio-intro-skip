@@ -272,6 +272,14 @@ public final class IntroSkipBridge {
         // overlay + keys
         private FrameLayout host;
         private TextView pill;
+        private LinearLayout pillCard;
+        private View pillIcon;
+        private TextView pillSub;
+        private TextView pillBadge;
+        private View pillProgressTrack;
+        private View pillProgressFill;
+        private int accentColor = 0xFF5B67F1;
+        private boolean accentResolved;
         private boolean pillShown;
         private boolean armed;
         private boolean manualArmed;
@@ -436,9 +444,9 @@ public final class IntroSkipBridge {
                 // Window already gone.
             }
             debugDialog = null;
-            if (host != null && pill != null) {
+            if (host != null && overlayView() != null) {
                 try {
-                    host.removeView(pill);
+                    host.removeView(overlayView());
                 } catch (Throwable ignored) {
                     // View already gone with the window.
                 }
@@ -528,11 +536,11 @@ public final class IntroSkipBridge {
             }
             // If the user rewinds to before a previously skipped segment (> 2 s before its start),
             // re-arm auto-skip for that segment so playing naturally into it skips again.
-            if (jumpedBack && !autoSkipped.isEmpty()) {
+            if (jumpedBack && (!autoSkipped.isEmpty() || !jumpSkips.isEmpty())) {
                 for (Segment s : segments) {
-                    if (pos < s.startSeconds - 2.0 && wasSkipped(s)) {
+                    if (pos < s.startSeconds - 2.0 && (wasSkipped(s) || jumpSkips.containsKey(s.key()))) {
                         autoSkipped.remove(s.key());
-                        autoSkipped.remove(s.label);
+                        jumpSkips.remove(s.key());
                         log("Re-armed " + s.label + " after rewind before start (pos=" + fmt(pos) + "s)");
                     }
                 }
@@ -571,20 +579,23 @@ public final class IntroSkipBridge {
                 if (playing) flowTicks = 3;
             }
 
-            Segment segment = segments.isEmpty() ? null : segmentAt(pos);
+            Segment segment = segments.isEmpty() ? null : segmentAt(pos, durationMs);
             if (segment != current) {
                 current = segment;
                 // A rewind into the segment (within 3 s of a seek key) or a forward jump deep
                 // (>= 15 s) into the segment within 1.2 s of a seek key is a deliberate user seek.
                 // Fast-forwarding up to the intro (even when NEXT_SYNC snaps several seconds inside)
                 // still auto-skips when the segment has not been skipped yet.
+                // Previews are exempt from the forward-lag rule: they sit right after the credits
+                // where everyone fast-forwards, so a deep landing must not latch "user seek".
                 currentByJump = segment != null && jumped;
                 double lag = segment == null ? 0.0 : pos - segment.startSeconds;
                 boolean warm = firstPlayingAt != 0 && now - firstPlayingAt > 3000L;
+                boolean forwardLagBlocked = segment != null && !segment.isPreview() && lag >= 15.0;
                 boolean deliberateSeek = segment != null && warm
                         && ((jumpedBack && now - lastSeekKeyAt < 3000L)
                         || (jumpedForward && now - lastSeekKeyAt < 1200L
-                        && (wasSkipped(segment) || lag >= 15.0)));
+                        && (wasSkipped(segment) || forwardLagBlocked)));
                 currentBySeek = deliberateSeek || (segment != null && inheritSeek);
                 if (segment != null) {
                     log("Segment entered " + segment.label + " pos=" + fmt(pos) + "s (start "
@@ -597,9 +608,10 @@ public final class IntroSkipBridge {
             inheritSeek = false;
             Integer jumpCount = segment == null ? null : jumpSkips.get(segment.key());
             boolean autoWanted = segment != null && wantsAuto(segment);
+            boolean skippedAlready = segment != null && wasSkipped(segment);
+            boolean jumpAllowed = !currentByJump || jumpCount == null || jumpCount < 3;
             boolean autoPending = segment != null && !currentBySeek && autoWanted
-                    && !wasSkipped(segment)
-                    && (!currentByJump || jumpCount == null || jumpCount < 3);
+                    && !skippedAlready && jumpAllowed;
             // Once the decoder has produced 3 steady ticks in this session (or played > 1.5 s),
             // do not require post-seek ticks before firing auto-skip.
             boolean flowReady = flowTicks >= 3 || steadyTicks >= 3
@@ -635,7 +647,15 @@ public final class IntroSkipBridge {
             if (segment != null && playWhenReady && !autoPending) {
                 installKeys();
                 nextPill = false;
-                if (pillSegment != segment || noticeUntil != 0 || !pillShown) showButton(segment);
+                if (pillSegment != segment || noticeUntil != 0 || !pillShown) {
+                    log("Auto-gate blocked " + segment.label + ": autoWanted=" + autoWanted
+                            + " currentBySeek=" + currentBySeek
+                            + " wasSkipped=" + skippedAlready
+                            + " currentByJump=" + currentByJump
+                            + " jumpCount=" + (jumpCount == null ? 0 : jumpCount)
+                            + " flowReady=" + flowReady);
+                    showButton(segment);
+                }
                 refreshArmed(now);
             } else if (noticeUntil != 0) {
                 if (now > noticeUntil) hidePill(true);
@@ -649,6 +669,9 @@ public final class IntroSkipBridge {
 
         private boolean maybeShowNext(double pos, long durationMs, boolean playWhenReady, long now) {
             try {
+                // Keep a "skipped" notice visible for its full 2.2 s, never clobber it
+                // with the next-episode pill on the tick right after a skip.
+                if (noticeUntil != 0 && now <= noticeUntil) return false;
                 if (movie || !playWhenReady || durationMs <= 0) return false;
                 double remaining = durationMs / 1000.0 - pos;
                 if (remaining < 0 || remaining > 90.0) {
@@ -667,20 +690,26 @@ public final class IntroSkipBridge {
             }
         }
 
-        /** One automatic skip per segment and media: a rewind into it shows the button instead. */
+        /** One automatic skip per segment and media: keyed by exact window so one
+         * segment can never poison another that shares its label. */
         private boolean wasSkipped(Segment segment) {
-            return autoSkipped.contains(segment.key()) || autoSkipped.contains(segment.label);
+            return autoSkipped.contains(segment.key());
         }
 
-        private Segment segmentAt(double pos) {
+        /** Upper segment bound clamped below the EOF seek clamp, so landing from an
+         * end-of-file skip never re-enters the same segment on the next tick. */
+        private Segment segmentAt(double pos, long durationMs) {
             boolean recaps = IntroSkipPrefs.isRecapsEnabled(activity);
             boolean creditsOff = IntroSkipPrefs.isCreditsOff(activity);
             boolean previews = IntroSkipPrefs.isPreviewsEnabled(activity);
+            double eofSeekCap = durationMs > 0
+                    ? (durationMs - 1000.0) / 1000.0 - 0.25 : Double.MAX_VALUE;
             for (Segment segment : segments) {
                 if (!recaps && segment.isRecap()) continue;
                 if (creditsOff && segment.isCredits()) continue;
                 if (!previews && segment.isPreview()) continue;
-                if (pos >= segment.startSeconds && pos < segment.endSeconds - 0.4) return segment;
+                double endLimit = Math.min(segment.endSeconds - 0.4, eofSeekCap);
+                if (pos >= segment.startSeconds && pos < endLimit) return segment;
             }
             return null;
         }
@@ -703,9 +732,11 @@ public final class IntroSkipBridge {
                 log("ERROR seek: " + error);
                 return;
             }
-            if (!automatic || target - pos >= 3.0) {
+            // Mark EOF-clamped skips too, so an end-of-file preview cannot loop back
+            // into its own segment on the landing tick.
+            boolean clampedToEof = durationMs > 0 && segment.endSeconds * 1000.0 >= durationMs - 1500.0;
+            if (!automatic || target - pos >= 3.0 || clampedToEof) {
                 autoSkipped.add(segment.key());
-                autoSkipped.add(segment.label);
             }
             guardUntil = SystemClock.uptimeMillis() + 2500L;
             guardTarget = target;
@@ -964,7 +995,9 @@ public final class IntroSkipBridge {
             boolean hadPrimary = !merged.isEmpty();
             if (fallback != null) {
                 for (Segment s : fallback) {
-                    if (hadPrimary && !"OP".equals(s.label)) continue;
+                    // Fallback may supply a missing preview even when the primary
+                    // (usually AniSkip) only has the OP.
+                    if (hadPrimary && !"OP".equals(s.label) && !s.isPreview()) continue;
                     if ("OP".equals(s.label) && chapters != null && !chapters.isEmpty()) {
                         for (int i = 0; i < merged.size(); i++) {
                             Segment p = merged.get(i);
@@ -1048,7 +1081,7 @@ public final class IntroSkipBridge {
                 }
             };
             double runtime = runtimeSeconds();
-            List<Segment> named = chapterSegments(chapters, false, combineLogger);
+            List<Segment> named = chapterSegments(chapters, false, runtime, combineLogger);
             boolean strongIntro = false;
             for (Segment segment : named) {
                 if (!segment.isRecap() && !segment.isCredits() && !segment.isPreview()
@@ -1059,7 +1092,7 @@ public final class IntroSkipBridge {
             if (!strongIntro && online != null && !waitChapters) {
                 // A weak "Intro" chapter only counts if an online source agrees within 15 s
                 // (never when online is empty, as fansubs often name the 0:00 cold open "Intro").
-                for (Segment weak : chapterSegments(chapters, true, combineLogger)) {
+                for (Segment weak : chapterSegments(chapters, true, runtime, combineLogger)) {
                     boolean confirmed = false;
                     for (Segment o : online) {
                         if (!o.isRecap() && !o.isCredits() && !o.isPreview()
@@ -1106,12 +1139,21 @@ public final class IntroSkipBridge {
                 }
             }
             // Source-agnostic positional + duration sanity on the merged list before snap().
+            if (sysprop("debug.aniskip.testpreview") && !hasSegmentType(merged, "preview")) {
+                merged.add(new Segment(15.0, 30.0, "preview", "synthetic-test"));
+                pendingLogs.add("Injected synthetic preview 15.000-30.000s (debug.aniskip.testpreview=1)");
+            }
             positionalSanity(merged, runtime, combineLogger);
 
             List<Segment> out = new ArrayList<>();
             for (Segment segment : merged) {
-                Segment candidate = segment.source.startsWith("chapter ")
+                // Chapter windows and previews are used as-is: snapping a short
+                // end-of-episode preview onto nearby boundaries mangles it.
+                Segment candidate = (segment.source.startsWith("chapter ") || segment.isPreview())
                         ? segment : snap(segment, chapters);
+                if (candidate.isPreview()) {
+                    trimCreditsBeforePreview(out, candidate, combineLogger);
+                }
                 if (!overlaps(out, candidate.startSeconds, candidate.endSeconds)) {
                     out.add(candidate);
                 }
@@ -1175,6 +1217,33 @@ public final class IntroSkipBridge {
 
         // ------------------------------------------------------------ overlay
 
+        /** View actually added to the host: the card when built, else the legacy pill. */
+        private View overlayView() {
+            return pillCard != null ? pillCard : pill;
+        }
+
+        /** Stremio's own accent from the host theme, else Stremio brand purple. */
+        private int resolveAccentColor() {
+            if (accentResolved) return accentColor;
+            accentResolved = true;
+            try {
+                TypedValue tv = new TypedValue();
+                android.content.res.Resources.Theme theme = activity.getTheme();
+                if (theme != null) {
+                    int attr = Build.VERSION.SDK_INT >= 21
+                            ? android.R.attr.colorAccent : android.R.attr.colorPrimary;
+                    if (theme.resolveAttribute(attr, tv, true)
+                            && tv.data != 0 && tv.data != Color.BLACK && tv.data != Color.WHITE) {
+                        accentColor = tv.data | 0xFF000000;
+                        return accentColor;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            accentColor = 0xFF5B67F1;
+            return accentColor;
+        }
+
         private void ensurePill() {
             if (pill != null) return;
             View content = activity.findViewById(android.R.id.content);
@@ -1184,24 +1253,138 @@ public final class IntroSkipBridge {
             }
             if (content == null) return;
             host = (FrameLayout) content;
-            pill = new TextView(activity);
-            pill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-            pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            pill.setGravity(Gravity.CENTER);
-            pill.setSingleLine(true);
-            pill.setPadding(dp(22), dp(11), dp(22), dp(11));
-            pill.setFocusable(false);
-            pill.setFocusableInTouchMode(false);
-            pill.setClickable(false);
-            pill.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            pill.setVisibility(View.GONE);
-            pill.setAlpha(0f);
-            if (Build.VERSION.SDK_INT >= 21) pill.setElevation(dp(8));
-            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.BOTTOM | Gravity.END);
-            params.setMargins(0, 0, dp(48), dp(48));
-            host.addView(pill, params);
+            try {
+                final int accent = resolveAccentColor();
+                pillCard = new LinearLayout(activity);
+                pillCard.setOrientation(LinearLayout.VERTICAL);
+                pillCard.setFocusable(false);
+                pillCard.setFocusableInTouchMode(false);
+                pillCard.setClickable(false);
+                pillCard.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                pillCard.setVisibility(View.GONE);
+                pillCard.setAlpha(0f);
+                if (Build.VERSION.SDK_INT >= 21) {
+                    pillCard.setElevation(dp(12));
+                    pillCard.setClipToOutline(true);
+                }
+
+                LinearLayout row = new LinearLayout(activity);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(18), dp(12), dp(16), dp(11));
+
+                pillIcon = new View(activity) {
+                    @Override
+                    protected void onDraw(android.graphics.Canvas canvas) {
+                        super.onDraw(canvas);
+                        try {
+                            android.graphics.Paint p = new android.graphics.Paint(
+                                    android.graphics.Paint.ANTI_ALIAS_FLAG);
+                            p.setColor(armed ? 0xFFFFFFFF : accent);
+                            float w = getWidth();
+                            float h = getHeight();
+                            if (noticeUntil != 0) {
+                                p.setStyle(android.graphics.Paint.Style.STROKE);
+                                p.setStrokeWidth(dp(2));
+                                p.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+                                p.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+                                android.graphics.Path check = new android.graphics.Path();
+                                check.moveTo(w * 0.18f, h * 0.52f);
+                                check.lineTo(w * 0.42f, h * 0.76f);
+                                check.lineTo(w * 0.84f, h * 0.26f);
+                                canvas.drawPath(check, p);
+                            } else {
+                                p.setStyle(android.graphics.Paint.Style.FILL);
+                                android.graphics.Path tri = new android.graphics.Path();
+                                tri.moveTo(w * 0.12f, h * 0.18f);
+                                tri.lineTo(w * 0.62f, h * 0.50f);
+                                tri.lineTo(w * 0.12f, h * 0.82f);
+                                tri.close();
+                                canvas.drawPath(tri, p);
+                                canvas.drawRoundRect(new android.graphics.RectF(
+                                        w * 0.70f, h * 0.20f, w * 0.84f, h * 0.80f),
+                                        dp(1), dp(1), p);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                };
+                LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(18), dp(18));
+                iconLp.setMargins(0, 0, dp(12), 0);
+                row.addView(pillIcon, iconLp);
+
+                LinearLayout textCol = new LinearLayout(activity);
+                textCol.setOrientation(LinearLayout.VERTICAL);
+                pill = new TextView(activity);
+                pill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+                pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+                pill.setSingleLine(true);
+                pill.setTextColor(0xFFF2F4F8);
+                textCol.addView(pill);
+
+                pillSub = new TextView(activity);
+                pillSub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+                pillSub.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+                pillSub.setSingleLine(true);
+                pillSub.setTextColor(0xFF9EA6B8);
+                pillSub.setVisibility(View.GONE);
+                textCol.addView(pillSub);
+
+                LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                textLp.setMargins(0, 0, dp(14), 0);
+                row.addView(textCol, textLp);
+
+                pillBadge = new TextView(activity);
+                pillBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+                pillBadge.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+                pillBadge.setGravity(Gravity.CENTER);
+                pillBadge.setSingleLine(true);
+                pillBadge.setPadding(dp(8), dp(3), dp(8), dp(3));
+                row.addView(pillBadge, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                pillCard.addView(row);
+
+                FrameLayout track = new FrameLayout(activity);
+                track.setBackgroundColor(0x26FFFFFF);
+                pillProgressTrack = track;
+                pillProgressFill = new View(activity);
+                pillProgressFill.setBackgroundColor(accent);
+                pillProgressFill.setPivotX(0f);
+                pillProgressFill.setScaleX(0f);
+                track.addView(pillProgressFill, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                pillCard.addView(track, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
+
+                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM | Gravity.END);
+                params.setMargins(0, 0, dp(48), dp(44));
+                host.addView(pillCard, params);
+            } catch (Throwable fallbackError) {
+                // Fail-soft degradation to original single TextView pill.
+                pillCard = null;
+                pill = new TextView(activity);
+                pill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+                pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                pill.setGravity(Gravity.CENTER);
+                pill.setSingleLine(true);
+                pill.setPadding(dp(22), dp(11), dp(22), dp(11));
+                pill.setFocusable(false);
+                pill.setFocusableInTouchMode(false);
+                pill.setClickable(false);
+                pill.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                pill.setVisibility(View.GONE);
+                pill.setAlpha(0f);
+                if (Build.VERSION.SDK_INT >= 21) pill.setElevation(dp(8));
+                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM | Gravity.END);
+                params.setMargins(0, 0, dp(48), dp(48));
+                host.addView(pill, params);
+            }
         }
 
         private void triggerPillAction() {
@@ -1228,12 +1411,49 @@ public final class IntroSkipBridge {
 
         private void styleArmed(boolean isArmed) {
             if (pill == null) return;
-            if (isArmed) {
-                pill.setBackground(roundedBackground(0xF2FFFFFF, 0x00FFFFFF, dp(6)));
-                pill.setTextColor(0xFF15131A);
-            } else {
-                pill.setBackground(roundedBackground(0xCC17151C, 0x59FFFFFF, dp(6)));
-                pill.setTextColor(0xFFF2F0F5);
+            try {
+                int accent = resolveAccentColor();
+                if (pillCard == null) {
+                    if (isArmed) {
+                        pill.setBackground(roundedBackground(0xF2FFFFFF, 0x00FFFFFF, dp(6)));
+                        pill.setTextColor(0xFF15131A);
+                    } else {
+                        pill.setBackground(roundedBackground(0xCC17151C, 0x59FFFFFF, dp(6)));
+                        pill.setTextColor(0xFFF2F0F5);
+                    }
+                    return;
+                }
+                if (noticeUntil != 0) {
+                    pillCard.setBackground(roundedBackground(0xEB101216, accent, dp(12)));
+                    pill.setTextColor(0xFFF2F4F8);
+                    if (pillBadge != null) pillBadge.setVisibility(View.GONE);
+                    if (pillSub != null) pillSub.setVisibility(View.GONE);
+                    if (pillProgressTrack != null) pillProgressTrack.setVisibility(View.GONE);
+                } else if (isArmed) {
+                    pillCard.setBackground(roundedBackground(0xF51A1E25, accent, dp(12)));
+                    pill.setTextColor(0xFFFFFFFF);
+                    if (pillBadge != null) {
+                        pillBadge.setVisibility(View.VISIBLE);
+                        pillBadge.setText("OK");
+                        pillBadge.setTextColor(0xFFFFFFFF);
+                        pillBadge.setBackground(roundedBackground(accent, accent, dp(6)));
+                    }
+                    if (pillProgressTrack != null) pillProgressTrack.setVisibility(View.VISIBLE);
+                    pillCard.animate().scaleX(1.03f).scaleY(1.03f).setDuration(140L).start();
+                } else {
+                    pillCard.setBackground(roundedBackground(0xD9101216, 0xFF303743, dp(12)));
+                    pill.setTextColor(0xFFD5DAE5);
+                    if (pillBadge != null) {
+                        pillBadge.setVisibility(View.VISIBLE);
+                        pillBadge.setText("▼");
+                        pillBadge.setTextColor(0xFF9EA6B8);
+                        pillBadge.setBackground(roundedBackground(0xFF252B35, 0xFF3E4756, dp(6)));
+                    }
+                    if (pillProgressTrack != null) pillProgressTrack.setVisibility(View.VISIBLE);
+                    pillCard.animate().scaleX(0.98f).scaleY(0.98f).setDuration(140L).start();
+                }
+                if (pillIcon != null) pillIcon.invalidate();
+            } catch (Throwable ignored) {
             }
         }
 
@@ -1259,7 +1479,7 @@ public final class IntroSkipBridge {
             nextPill = true;
             noticeUntil = 0;
             armed = manualArmed || (!controlsVisible() && SystemClock.uptimeMillis() - lastOtherKeyAt > 600L);
-            pill.setText("Next episode (OK)");
+            pill.setText(pillCard != null ? "Next Episode" : "Next episode (OK)");
             styleArmed(armed);
             fadeIn();
             log("Button shown: Next episode (OK)" + (armed ? " (OK = next)" : " (OK to player)"));
@@ -1445,12 +1665,29 @@ public final class IntroSkipBridge {
         }
 
         private void fadeIn() {
+            View target = overlayView();
+            if (target == null) return;
             updatePillPosition();
             if (!pillShown) {
                 pillShown = true;
-                pill.animate().cancel();
-                pill.setVisibility(View.VISIBLE);
-                pill.animate().alpha(1f).setDuration(160L).start();
+                try {
+                    target.animate().cancel();
+                    target.setVisibility(View.VISIBLE);
+                    target.setAlpha(0f);
+                    target.setTranslationX(dp(20));
+                    target.setScaleX(0.94f);
+                    target.setScaleY(0.94f);
+                    target.animate()
+                            .alpha(1f)
+                            .translationX(0f)
+                            .scaleX(armed ? 1.03f : 1f)
+                            .scaleY(armed ? 1.03f : 1f)
+                            .setDuration(200L)
+                            .start();
+                } catch (Throwable ignored) {
+                    target.setVisibility(View.VISIBLE);
+                    target.setAlpha(1f);
+                }
             }
         }
 
@@ -1461,28 +1698,70 @@ public final class IntroSkipBridge {
             pillSegment = null;
             nextPill = false;
             noticeUntil = 0;
-            if (pill == null || !pillShown) return;
+            final View target = overlayView();
+            if (target == null || !pillShown) return;
             pillShown = false;
-            pill.animate().cancel();
-            if (animate) {
-                pill.animate().alpha(0f).setDuration(160L).withEndAction(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (!pillShown && pill != null) pill.setVisibility(View.GONE);
-                    }
-                }).start();
-            } else {
-                pill.setAlpha(0f);
-                pill.setVisibility(View.GONE);
+            try {
+                target.animate().cancel();
+                if (animate) {
+                    target.animate()
+                            .alpha(0f)
+                            .translationX(dp(16))
+                            .scaleX(0.95f)
+                            .scaleY(0.95f)
+                            .setDuration(160L)
+                            .withEndAction(new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (!pillShown) target.setVisibility(View.GONE);
+                                }
+                            }).start();
+                } else {
+                    target.setAlpha(0f);
+                    target.setTranslationX(0f);
+                    target.setVisibility(View.GONE);
+                }
+            } catch (Throwable ignored) {
+                target.setVisibility(View.GONE);
             }
         }
 
         private void updatePillPosition() {
-            if (pill == null || !pillShown) return;
-            // Lift above Leanback's transport row while it is on screen.
-            float lift = controlsVisible() ? -dp(56) : 0f;
-            if (pill.getTranslationY() != lift) {
-                pill.animate().translationY(lift).setDuration(160L).start();
+            View target = overlayView();
+            if (target == null || !pillShown) return;
+            try {
+                float lift = controlsVisible() ? -dp(56) : 0f;
+                if (Math.abs(target.getTranslationY() - lift) > 0.5f) {
+                    target.animate().translationY(lift).setDuration(180L).start();
+                }
+                if (pillCard != null && noticeUntil == 0) {
+                    double progress = 0.0;
+                    int remSec = -1;
+                    if (pillSegment != null && lastPos >= pillSegment.startSeconds) {
+                        double total = Math.max(1.0, pillSegment.endSeconds - pillSegment.startSeconds);
+                        progress = Math.min(1.0, Math.max(0.0, (lastPos - pillSegment.startSeconds) / total));
+                        remSec = Math.max(0, (int) Math.ceil(pillSegment.endSeconds - lastPos));
+                    } else if (nextPill && player != null) {
+                        long dur = player.getDuration();
+                        if (dur > 0 && lastPos >= 0) {
+                            double rem = Math.max(0.0, dur / 1000.0 - lastPos);
+                            progress = Math.min(1.0, Math.max(0.0, (90.0 - rem) / 90.0));
+                            remSec = (int) Math.ceil(rem);
+                        }
+                    }
+                    if (pillProgressFill != null) {
+                        pillProgressFill.setScaleX((float) progress);
+                    }
+                    if (pillSub != null) {
+                        if (remSec >= 0) {
+                            pillSub.setVisibility(View.VISIBLE);
+                            pillSub.setText((armed ? "Press OK · " : "Press Down · ") + remSec + "s left");
+                        } else {
+                            pillSub.setVisibility(View.GONE);
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
             }
         }
 
@@ -1635,9 +1914,11 @@ public final class IntroSkipBridge {
 
                 Button refresh = dialogButton("Refresh");
                 Button copy = dialogButton("Copy");
+                Button testPreview = dialogButton("Test Preview");
                 Button close = dialogButton("Close");
                 header.addView(refresh);
                 header.addView(copy);
+                header.addView(testPreview);
                 header.addView(close);
                 root.addView(header);
 
@@ -1679,6 +1960,24 @@ public final class IntroSkipBridge {
                     @Override
                     public void onClick(View v) {
                         dialog.dismiss();
+                    }
+                });
+                testPreview.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        try {
+                            double pos = player != null ? player.getCurrentPosition() / 1000.0 : 10.0;
+                            Segment synth = new Segment(pos + 3.0, pos + 18.0, "preview", "debug-injected");
+                            segments.add(synth);
+                            autoSkipped.remove(synth.key());
+                            jumpSkips.remove(synth.key());
+                            log("Segments kept (debug-injected, 0 ms): 1 preview "
+                                    + fmt3(synth.startSeconds) + "-" + fmt3(synth.endSeconds)
+                                    + " [debug-injected]");
+                            dialog.dismiss();
+                        } catch (Throwable error) {
+                            log("ERROR test preview: " + error);
+                        }
                     }
                 });
 
@@ -2013,10 +2312,10 @@ public final class IntroSkipBridge {
 
     /** Chapters whose NAME says opening/intro/recap/credits/preview: their exact start/end. */
     private static List<Segment> chapterSegments(List<MkvChapters.Chapter> chapters, boolean weak,
-                                                 DebugLogger logger) {
+                                                 double fallbackRuntime, DebugLogger logger) {
         List<Segment> out = new ArrayList<>();
         if (chapters == null || chapters.isEmpty()) return out;
-        double runtime = 0;
+        double runtime = fallbackRuntime > 0 ? fallbackRuntime : 0;
         for (MkvChapters.Chapter c : chapters) {
             if (c != null && c.end > runtime) runtime = c.end;
         }
@@ -2025,9 +2324,13 @@ public final class IntroSkipBridge {
         for (int i = 0; i < n; i++) {
             MkvChapters.Chapter chapter = chapters.get(i);
             if (chapter == null) continue;
-            double length = chapter.end - chapter.start;
+            // The final chapter often omits its end time: fall back to runtime so a
+            // tail preview chapter (the usual preview position) survives.
+            double end = chapter.end > chapter.start ? chapter.end
+                    : (i == n - 1 && runtime > chapter.start ? runtime : chapter.end);
+            double length = end - chapter.start;
             // A label, not a scene description ("Mike Takes His Leave of the Crew, Opening Credits").
-            if (chapter.end <= 0 || CHAPTER_NOT.matcher(chapter.name).find()
+            if (end <= 0 || CHAPTER_NOT.matcher(chapter.name).find()
                     || normTitle(chapter.name).split(" ").length > 4) continue;
             boolean intro = weak ? CHAPTER_WEAK_INTRO.matcher(chapter.name).find()
                     && !CHAPTER_INTRO.matcher(chapter.name).find() : CHAPTER_INTRO.matcher(chapter.name).find();
@@ -2036,13 +2339,13 @@ public final class IntroSkipBridge {
             boolean allowCredits = !(lower.contains("opening") || lower.contains("main title")
                     || (lower.contains("credits") && (runtime <= 0 || chapter.start < runtime * 0.25)));
             if (intro && length >= 15 && length <= 240) {
-                matched[i] = new Segment(chapter.start, chapter.end, "OP", "chapter \"" + chapter.name + "\"");
+                matched[i] = new Segment(chapter.start, end, "OP", "chapter \"" + chapter.name + "\"");
             } else if (!weak && CHAPTER_RECAP.matcher(chapter.name).find() && length >= 10 && length <= 360) {
-                matched[i] = new Segment(chapter.start, chapter.end, "recap", "chapter \"" + chapter.name + "\"");
+                matched[i] = new Segment(chapter.start, end, "recap", "chapter \"" + chapter.name + "\"");
             } else if (!weak && allowCredits && CHAPTER_CREDITS.matcher(chapter.name).find() && length >= 15 && length <= 480) {
-                matched[i] = new Segment(chapter.start, chapter.end, "credits", "chapter \"" + chapter.name + "\"");
+                matched[i] = new Segment(chapter.start, end, "credits", "chapter \"" + chapter.name + "\"");
             } else if (!weak && CHAPTER_PREVIEW.matcher(chapter.name).find() && length >= 10 && length <= 300) {
-                matched[i] = new Segment(chapter.start, chapter.end, "preview", "chapter \"" + chapter.name + "\"");
+                matched[i] = new Segment(chapter.start, end, "preview", "chapter \"" + chapter.name + "\"");
             }
         }
         boolean[] ambiguous = new boolean[n];
@@ -2131,10 +2434,10 @@ public final class IntroSkipBridge {
         }
 
         String buttonText() {
-            if (isRecap()) return "Skip recap (OK)";
-            if (isCredits()) return "Skip credits (OK)";
-            if (isPreview()) return "Skip preview (OK)";
-            return "Skip intro (OK)";
+            if (isRecap()) return "Skip Recap";
+            if (isCredits()) return "Skip Credits";
+            if (isPreview()) return "Skip Preview";
+            return "Skip Intro";
         }
 
         String skippedText() {
@@ -2982,7 +3285,7 @@ public final class IntroSkipBridge {
                     else if ("credits".equals(kind)) label = "credits";
                     else label = "preview";
                     Segment segment = new Segment(start, end, label, "IntroDB");
-                    if (overlaps(out, start, end)) {
+                    if (overlapsBlocking(out, segment)) {
                         logger.log("IntroDB: duplicate skipped (" + kind + " " + start + "s)");
                         continue;
                     }
@@ -3477,15 +3780,42 @@ public final class IntroSkipBridge {
         return false;
     }
 
-    /** Allows an OP candidate through when the only overlap in the list is a credits segment. */
+    /** Allows an OP or preview candidate through when the only overlap in the list
+     * is a credits segment (credits get trimmed before previews in combine()). */
     private static boolean overlapsBlocking(List<Segment> segments, Segment candidate) {
         for (Segment segment : segments) {
-            if ("OP".equals(candidate.label) && segment.isCredits()) continue;
+            if (("OP".equals(candidate.label) || candidate.isPreview()) && segment.isCredits()) continue;
             double start = Math.max(segment.startSeconds, candidate.startSeconds);
             double end = Math.min(segment.endSeconds, candidate.endSeconds);
             if (end - start > 1.0) return true;
         }
         return false;
+    }
+
+    /** Trims an earlier credits segment at preview start so credits never swallow
+     * a tail preview that starts over them; drops the credits when too short to keep. */
+    private static void trimCreditsBeforePreview(List<Segment> segments, Segment preview,
+                                                 DebugLogger logger) {
+        for (int i = segments.size() - 1; i >= 0; i--) {
+            Segment s = segments.get(i);
+            if (!s.isCredits()) continue;
+            double overlap = Math.min(s.endSeconds, preview.endSeconds)
+                    - Math.max(s.startSeconds, preview.startSeconds);
+            if (overlap <= 1.0) continue;
+            if (preview.startSeconds - s.startSeconds >= 10.0) {
+                segments.set(i, new Segment(s.startSeconds, preview.startSeconds, s.label, s.source));
+                if (logger != null) {
+                    logger.log("Trimmed credits end " + fmt3(s.endSeconds) + "s -> "
+                            + fmt3(preview.startSeconds) + "s before preview");
+                }
+            } else {
+                segments.remove(i);
+                if (logger != null) {
+                    logger.log("Dropped credits overlapped by preview "
+                            + fmt3(preview.startSeconds) + "-" + fmt3(preview.endSeconds) + "s");
+                }
+            }
+        }
     }
 
     /**
