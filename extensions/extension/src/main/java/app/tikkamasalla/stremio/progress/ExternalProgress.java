@@ -277,12 +277,17 @@ public final class ExternalProgress {
                 intent.putExtra("title", capTitle);
             }
             if (capSubUris.length > 0) {
-                android.net.Uri[] uris = new android.net.Uri[capSubUris.length];
-                for (int i = 0; i < capSubUris.length; i++) {
-                    uris[i] = android.net.Uri.parse(capSubUris[i]);
+                String pkg = intent.getComponent() != null
+                        ? intent.getComponent().getPackageName() : intent.getPackage();
+                boolean isVimu = pkg != null && pkg.startsWith("net.gtvbox.");
+                if (!isVimu) {
+                    android.net.Uri[] uris = new android.net.Uri[capSubUris.length];
+                    for (int i = 0; i < capSubUris.length; i++) {
+                        uris[i] = android.net.Uri.parse(capSubUris[i]);
+                    }
+                    intent.putExtra("subs", uris);
+                    intent.putExtra("subs.name", capSubNames);
                 }
-                intent.putExtra("subs", uris);
-                intent.putExtra("subs.name", capSubNames);
                 if (capEnableUri.length() > 0) {
                     intent.putExtra("subs.enable",
                             new android.net.Uri[]{android.net.Uri.parse(capEnableUri)});

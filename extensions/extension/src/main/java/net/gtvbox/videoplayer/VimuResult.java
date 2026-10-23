@@ -59,7 +59,10 @@ public final class VimuResult {
             if (prev != null && prev != next) {
                 stopVimuPlayer(prev);
                 Activity prevAct = prev.getActivity();
-                if (prevAct != null && !prevAct.isFinishing()) {
+                Activity nextAct = next == null ? null : next.getActivity();
+                // Never finish the activity we are launching into: on fragment
+                // replacement inside one PlayerActivity both are the same.
+                if (prevAct != null && prevAct != nextAct && !prevAct.isFinishing()) {
                     prevAct.finish();
                 }
             }

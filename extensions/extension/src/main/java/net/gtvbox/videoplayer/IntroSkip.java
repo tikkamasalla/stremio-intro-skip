@@ -241,6 +241,9 @@ public final class IntroSkip implements Runnable {
     private boolean armed;
     private Seg pillSegment;
     private boolean controlsMethodLookedUp;
+    /** Throttle for the expensive view-tree scan (see controlsVisible). */
+    private long lastControlsCheckMs;
+    private boolean lastControlsVisible;
     private Method controlsVisibleMethod;
 
     private final Runnable precise = new Runnable() {
@@ -363,7 +366,8 @@ public final class IntroSkip implements Runnable {
                 return;
             }
             readHandoff(extras);
-            if (extSubUrl.length() > 0 && fragment instanceof PlayerFragment) {
+            if (extSubUrl.length() > 0 && fragment instanceof PlayerFragment
+                    && (extSubUrl.startsWith("http://") || extSubUrl.startsWith("https://"))) {
                 try {
                     Activity activity = ((PlayerFragment) fragment).getActivity();
                     Intent intent = activity == null ? null : activity.getIntent();
@@ -664,19 +668,22 @@ public final class IntroSkip implements Runnable {
             if (pillShown) hidePill(true);
             return;
         }
-        applyPendingSub(f, p);
         long now = SystemClock.uptimeMillis();
-        int duration = p.getDuration();
+        int duration;
+        boolean playingNow;
+        int posNow;
+        try {
+            duration = p.getDuration();
+            playingNow = p.isPlaying();
+            posNow = p.getCurrentPosition();
+        } catch (Throwable error) {
+            return;
+        }
         if (p != player) {
             player = p;
             resetMedia();
         }
-        if (audioPending && duration > 0) {
-            applyPendingAudio(f, p);
-        }
         durationMs = duration;
-        boolean playingNow = p.isPlaying();
-        int posNow = p.getCurrentPosition();
 
         if (!VimuIntroSkipPrefs.isEnabled(f)) {
             current = null;
@@ -707,6 +714,15 @@ public final class IntroSkip implements Runnable {
         flowPos = posNow;
         if (!playingNow || moved < 0 || moved >= 1500) flowTicks = 0;
         else if (moved > 0) flowTicks++;
+        // Only touch subtitle/audio tracks once the decoder is steadily
+        // advancing: mutating tracks during prepare crashes natively on
+        // some files (decoder not initialized yet).
+        if (duration > 0 && playingNow && flowTicks >= 2) {
+            applyPendingSub(f, p);
+            if (audioPending) {
+                applyPendingAudio(f, p);
+            }
+        }
         if (now >= nextChapterRead && (segments == null ? chapterReads < 40 : true)) {
             chapterReads++;
             // Until found: every 3 s. Afterwards every 10 s, only to notice a new file in the same player.
@@ -719,8 +735,9 @@ public final class IntroSkip implements Runnable {
                 }
                 chapterSignature = signature;
                 readChapters(p, duration);
-                // If online segments were applied before chapters loaded and chapters have no intro, re-snap now.
-                if (!chaptersHaveIntro) remoteApplied = false;
+                // Chapters arriving late overwrite segments: always re-merge
+                // remote afterwards so online Credits/Preview survive.
+                remoteApplied = false;
             }
         }
         if (!remoteStarted && duration > 0 && playingNow) {
@@ -728,27 +745,33 @@ public final class IntroSkip implements Runnable {
             remoteAttempts = 1;
             lastRemoteAttemptMs = now;
             startRemoteLookup(f, duration);
-        } else if (remoteStarted && (remote == null || remote.isEmpty()) && playingNow
+        } else if (remoteStarted && (remote == null || !hasSegType(remote, "Credits")) && playingNow
                 && remoteAttempts < 3 && now - lastRemoteAttemptMs > 20000L) {
-            // The one-shot lookup found nothing (or failed outright): retry a
-            // bounded number of times while the same media plays, then stop.
+            // Retry while the episode still lacks Credits (an OP-only answer
+            // is not a complete one): bounded, same media only, then stop.
             remoteAttempts++;
             lastRemoteAttemptMs = now;
-            Log.i(TAG, "Remote lookup empty, retrying (" + remoteAttempts + "/3)");
+            Log.i(TAG, "Remote lookup incomplete, retrying (" + remoteAttempts + "/3)");
             startRemoteLookup(f, duration);
         }
         List<Seg> fromRemote = remote;
-        if (!chaptersHaveIntro && !remoteApplied && fromRemote != null && !fromRemote.isEmpty()
-                && chapterReads >= 1) {
-            // Chapters had their chance (read at least once) and yielded no intro chapter: use online segments.
+        if (!remoteApplied && fromRemote != null && !fromRemote.isEmpty() && chapterReads >= 1) {
             remoteApplied = true;
             inheritSeek = current != null && currentBySeek;
-            List<Seg> snapped = snapSegments(fromRemote, p.E(), duration);
+            List<Seg> snapped = snapSegments(fromRemote, safeChapterStarts(p), duration);
             List<Seg> merged = new ArrayList<>();
             if (segments != null) {
                 merged.addAll(segments);
             }
             for (Seg s : snapped) {
+                // Chapters own the intro when they have one; online fills the
+                // types chapters never supply (Recap/Credits/Preview) plus a
+                // missing intro. Never let online wipe a chapter intro.
+                boolean isIntro = !s.recap() && !s.credits() && !s.preview();
+                if (isIntro && chaptersHaveIntro) continue;
+                if (s.credits() && hasSegType(merged, "Credits")) continue;
+                if (s.preview() && hasSegType(merged, "Preview")) continue;
+                if (s.recap() && hasSegType(merged, "Recap")) continue;
                 if (!overlapsMs(merged, s.start, s.end)) {
                     merged.add(s);
                 }
@@ -1033,6 +1056,26 @@ public final class IntroSkip implements Runnable {
             if (activity != null && !activity.hasWindowFocus()) {
                 return true;
             }
+            // The recursive view scan below is expensive: cache the verdict
+            // briefly (controls do not appear/disappear faster than this on a TV).
+            long nowMs = SystemClock.uptimeMillis();
+            if (nowMs - lastControlsCheckMs < 500L) return lastControlsVisible;
+            boolean answer = controlsVisibleScan(f);
+            lastControlsCheckMs = nowMs;
+            lastControlsVisible = answer;
+            return answer;
+        } catch (Throwable error) {
+            return false;
+        }
+    }
+
+    private boolean controlsVisibleScan(PlayerFragment f) {
+        try {
+            if (f == null) return false;
+            Activity activity = f.getActivity();
+            if (activity != null && !activity.hasWindowFocus()) {
+                return true;
+            }
             if (!controlsMethodLookedUp) {
                 controlsMethodLookedUp = true;
                 try {
@@ -1177,18 +1220,21 @@ public final class IntroSkip implements Runnable {
                 DEADLINE_MS.set(SystemClock.uptimeMillis() + LOOKUP_BUDGET_MS);
                 try {
                     List<Seg> ani = null;
+                    int[] malMapped = null;
                     if (animeEnabled) {
-                        ani = fetchAniSkip(ctx, info, durationMs);
+                        DEADLINE_MS.set(SystemClock.uptimeMillis() + LOOKUP_BUDGET_MS);
+                        malMapped = resolveMalId(ctx, info.title, info.season, info.episode,
+                                info.looksLikeAnime);
+                        ani = fetchAniSkipWithMal(ctx, malMapped, info.episode, durationMs);
                     } else {
                         Log.i(TAG, "AniSkip skipped: disabled in settings");
                     }
-                    // Always ask IntroDB too: AniSkip never serves Credits, so
-                    // "AniSkip hit, stop" would drop end credits every time.
-                    // The mapped season/episode reuses AniSkip's part-2 remap
-                    // (absolute "E19" -> S2E7) for the IMDb-keyed databases.
                     List<Seg> out = ani;
                     if (gen == mediaGen) {
-                        ParsedMedia mapped = mappedSeasonEpisode(ctx, info);
+                        // Fresh budget for the IMDb side so AniList never starves
+                        // IntroDB.app and SkipDB.
+                        DEADLINE_MS.set(SystemClock.uptimeMillis() + LOOKUP_BUDGET_MS);
+                        ParsedMedia mapped = applyMalRemap(info, malMapped);
                         out = mergeRemote(ani, fetchIntroDb(ctx, mapped, durationMs));
                     }
                     if (gen == mediaGen && out != null && !out.isEmpty()) {
@@ -1492,20 +1538,24 @@ public final class IntroSkip implements Runnable {
 
     /**
      * Part-2 absolute numbering ("E19") remapped to the season/episode the
-     * IMDb-keyed databases use ("S2E7"): resolveMalId already computes the
-     * offset for AniSkip, reuse its verdict here. Returns info unchanged on
-     * any failure.
+     * IMDb-keyed databases use ("S2E7"), reusing one resolveMalId verdict
+     * (never re-resolving here, so no duplicate AniList traffic).
+     * Never overrides a season Stremio handed over, and never drops the
+     * handed-over IMDb id. Returns info unchanged on any failure.
      */
-    private static ParsedMedia mappedSeasonEpisode(Context ctx, ParsedMedia info) {
+    private static ParsedMedia applyMalRemap(ParsedMedia info, int[] mapped) {
+        if (info == null || mapped == null || mapped.length < 3) return info;
         try {
-            int[] mapped = resolveMalId(ctx, info.title, info.season, info.episode, info.looksLikeAnime);
-            int bump = mapped.length > 2 ? mapped[2] : 0;
-            if (bump > 0) {
+            if ("stremio-extra".equals(info.raw)) return info;
+            int bump = mapped[2];
+            if (bump > 0 && info.season == 1 && mapped[1] > 0 && mapped[1] != info.episode) {
                 Log.i(TAG, "AniList: season " + info.season + " episode " + info.episode
                         + " remapped to season " + (info.season + bump) + " episode " + mapped[1]
                         + " for IntroDB/SkipDB");
-                return new ParsedMedia(info.title, info.season + bump, mapped[1],
+                ParsedMedia out = new ParsedMedia(info.title, info.season + bump, mapped[1],
                         info.year, info.looksLikeAnime, info.raw);
+                out.imdbId = info.imdbId;
+                return out;
             }
         } catch (Throwable error) {
             Log.w(TAG, "season remap failed", error);
@@ -1537,14 +1587,26 @@ public final class IntroSkip implements Runnable {
         List<Seg> out = new ArrayList<>();
         try {
             int[] mapped = resolveMalId(ctx, info.title, info.season, info.episode, info.looksLikeAnime);
-            int malId = mapped[0];
-            int episode = mapped[1];
+            return fetchAniSkipWithMal(ctx, mapped, info.episode, durationMs);
+        } catch (Throwable error) {
+            Log.w(TAG, "AniSkip lookup failed: " + error);
+        }
+        return out;
+    }
+
+    /** AniSkip query from an already-resolved MAL verdict (no second resolve). */
+    private static List<Seg> fetchAniSkipWithMal(Context ctx, int[] mapped, int fallbackEpisode,
+                                                 int durationMs) {
+        List<Seg> out = new ArrayList<>();
+        try {
+            int malId = mapped == null || mapped.length < 2 ? 0 : mapped[0];
+            int episode = mapped == null || mapped.length < 2 ? fallbackEpisode : mapped[1];
             if (malId <= 0) {
                 Log.i(TAG, "AniSkip: no confident MAL id for '" + info.title + "'");
                 return out;
             }
-            if (episode != info.episode) {
-                Log.i(TAG, "AniList: episode " + info.episode + " mapped to episode " + episode + " of part 2");
+            if (episode != fallbackEpisode) {
+                Log.i(TAG, "AniList: episode " + fallbackEpisode + " mapped to episode " + episode + " of part 2");
             }
             Log.i(TAG, "AniList: chosen idMal=" + malId + " episode=" + episode);
 
@@ -1893,8 +1955,15 @@ public final class IntroSkip implements Runnable {
             }
             // IntroDB.app fills only the segment types TheIntroDB has nothing for,
             // and evicts a mislabeled early "Credits" overlapping its Intro.
+            // Refresh the budget first: slow identity misses must never starve
+            // the sources that actually hold the data.
             if (isImdbId(id) && info.season > 0 && info.episode > 0
                     && !(hasSegType(out, "Intro") && hasSegType(out, "Recap") && hasSegType(out, "Credits"))) {
+                Long curDeadline = DEADLINE_MS.get();
+                long minFallbackDeadline = SystemClock.uptimeMillis() + 6000L;
+                if (curDeadline == null || curDeadline < minFallbackDeadline) {
+                    DEADLINE_MS.set(minFallbackDeadline);
+                }
                 for (Seg app : fetchIntroDbApp(id, info.season, info.episode)) {
                     if ("Intro".equals(app.name)) {
                         for (int i = out.size() - 1; i >= 0; i--) {
@@ -2603,11 +2672,21 @@ public final class IntroSkip implements Runnable {
     }
 
     private static String chapterSignature(e p) {
-        long[] starts = p.E();
+        long[] starts = safeChapterStarts(p);
         if (starts == null || starts.length == 0) return null;
         StringBuilder sig = new StringBuilder();
         for (long start : starts) sig.append(start).append(',');
         return sig.toString();
+    }
+
+    /** Demuxer chapter table without letting a torn-down player crash the tick. */
+    private static long[] safeChapterStarts(e p) {
+        try {
+            return p == null ? null : p.E();
+        } catch (Throwable error) {
+            Log.w(TAG, "chapterStarts", error);
+            return null;
+        }
     }
 
     private void skip(PlayerFragment f, e p, Seg seg, int pos, boolean automatic) {
@@ -2979,7 +3058,7 @@ public final class IntroSkip implements Runnable {
     private static final boolean UNNAMED_CHAPTER_HEURISTIC = false;
 
     private void readChapters(e p, int duration) {
-        long[] starts = p.E();
+        long[] starts = safeChapterStarts(p);
         if (starts == null || starts.length == 0) return;
         int n = starts.length;
         String[] names = new String[n];
@@ -3031,6 +3110,7 @@ public final class IntroSkip implements Runnable {
             String cname = names[i];
             if (cname == null || !END_CREDITS_CHAPTER.matcher(cname).find()) continue;
             if (OPENING_NAME.matcher(cname).find() || isIntroCredits(cname, starts[i], duration)) continue;
+            if (duration > 0 && starts[i] < duration / 2) continue;
             if (normTitle(cname).split(" ").length > 4) continue;
             int end = endOf(starts, i, duration);
             long lenMs = end > starts[i] ? (long) end - starts[i] : -1L;
