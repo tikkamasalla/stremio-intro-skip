@@ -271,6 +271,9 @@ public final class IntroSkipBridge {
         private long restoreSeekAt;
         /** EOF auto-advance fired once per media (see maybeShowNext). */
         private boolean eofAutoAdvanced;
+        /** Duration stability tracking: a transient wrong duration must never trigger EOF logic. */
+        private long lastDurationMs = -1L;
+        private long durationStableSinceMs;
         private boolean exoLookedUp;
         private Object exoInternal;
         private Method exoSetSeek;
@@ -383,6 +386,8 @@ public final class IntroSkipBridge {
             skippedAt = 0;
             restoreSeekAt = 0;
             eofAutoAdvanced = false;
+            lastDurationMs = -1L;
+            durationStableSinceMs = 0;
             movie = false;
             segments.clear();
             autoSkipped.clear();
@@ -571,6 +576,10 @@ public final class IntroSkipBridge {
             }
             lastPos = pos;
             lastPollAt = now;
+            if (durationMs != lastDurationMs) {
+                lastDurationMs = durationMs;
+                durationStableSinceMs = now;
+            }
             if (playing && firstPlayingAt == 0) firstPlayingAt = now;
             if (now - lastTraceAt >= 1000L && sysprop("debug.aniskip.trace")) {
                 lastTraceAt = now;
@@ -721,9 +730,12 @@ public final class IntroSkipBridge {
                 if (remaining < 0 && steadyTicks < 3) {
                     return false;
                 }
-                // Past a valid episode end with no ended event: advance once,
-                // hands-free, instead of stranding the user on a dead frame.
-                if (remaining <= -2.0 && !eofAutoAdvanced && steadyTicks >= 3
+                // At or a second past a stable episode end with no ended event:
+                // advance once, hands-free, instead of stranding the user on a
+                // dead frame. The stability gate keeps transient wrong durations
+                // (startup/manifest glitches) from ever triggering this.
+                if (remaining <= 1.0 && !eofAutoAdvanced && steadyTicks >= 3
+                        && now - durationStableSinceMs > 10000L
                         && !IntroSkipPrefs.isManualMode(activity)) {
                     eofAutoAdvanced = true;
                     log("EOF overrun (" + fmt(pos) + "s / " + fmt(durationSec)
