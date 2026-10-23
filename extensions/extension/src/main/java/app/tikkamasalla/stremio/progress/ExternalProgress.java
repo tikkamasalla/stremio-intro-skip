@@ -417,7 +417,7 @@ public final class ExternalProgress {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private static final java.util.concurrent.atomic.AtomicInteger BINGE_SEQ =
             new java.util.concurrent.atomic.AtomicInteger(0);
-    private static final long MIN_OPEN_MS = 60000L;
+    private static final long MIN_OPEN_MS = 10000L;
     private static final double FULL_RATIO = 0.9;
     private static final String KEY_ARMED_AT = "external_binge_armed_at";
     private static final long BINGE_TTL_MS = 60000L;
@@ -760,11 +760,14 @@ public final class ExternalProgress {
 
     /**
      * Hook at the start of the lambda the internal player calls when playback ends (it opens the
-     * next episode). Lets it through only for a real end: the player was open for a minute and sat
-     * at 90% of the duration or later. A failed file that ends at once, as when the stream does not
-     * play and Stremio falls back to VLC, would otherwise chain into the next episodes. The next
-     * episode pill does not pass through here. Fails open.
+     * next episode). Lets it through for a real end: position at 90% of duration or later.
+     * The open-time floor is deliberately short (10 s): it only stops instant-failure
+     * chaining (a file that errors in its first seconds must never advance), while a
+     * 60 s floor blocked every legitimate end reached within a minute of (re)starting
+     * playback (resume, re-entry, seeks), which on a TV is most of them. A failed file
+     * ends near position 0 and is already stopped by the 90% rule. Fails open.
      */
+    public static boolean allowAutoNext(Object lambda) {
     public static boolean allowAutoNext(Object lambda) {
         try {
             if (lambda == null) return true;
