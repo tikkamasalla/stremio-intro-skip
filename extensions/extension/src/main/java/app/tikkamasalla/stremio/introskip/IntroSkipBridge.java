@@ -264,6 +264,10 @@ public final class IntroSkipBridge {
         private double guardTarget;
         private Segment guardSegment;
         private long landingCheckAt;
+        /** EXACT seek params stay active until the async seek lands (see exactSeek). */
+        private long restoreSeekAt;
+        /** EOF auto-advance fired once per media (see maybeShowNext). */
+        private boolean eofAutoAdvanced;
         private boolean exoLookedUp;
         private Object exoInternal;
         private Method exoSetSeek;
@@ -374,6 +378,8 @@ public final class IntroSkipBridge {
             introDone = false;
             introResult = null;
             skippedAt = 0;
+            restoreSeekAt = 0;
+            eofAutoAdvanced = false;
             movie = false;
             segments.clear();
             autoSkipped.clear();
@@ -554,6 +560,10 @@ public final class IntroSkipBridge {
                 landingCheckAt = 0;
                 log("Position 1 s after skip: " + fmt3(pos) + "s (target " + fmt3(guardTarget) + "s)");
             }
+            if (restoreSeekAt != 0 && now >= restoreSeekAt) {
+                restoreSeekAt = 0;
+                restoreSeekParameters();
+            }
             if (guardUntil != 0) {
                 // Wait out the full guard window (plus any seek buffering) before
                 // judging the landing: ExoPlayer masks getCurrentPosition() to the
@@ -676,14 +686,30 @@ public final class IntroSkipBridge {
                 // Keep a "skipped" notice visible for its full 2.2 s, never clobber it
                 // with the next-episode pill on the tick right after a skip.
                 if (noticeUntil != 0 && now <= noticeUntil) return false;
-                if (movie || !playWhenReady || durationMs <= 0) return false;
-                double remaining = durationMs / 1000.0 - pos;
-                // Past the metadata end (position overruns duration on some
-                // HTTP streams): the player may never fire its ended event,
-                // so offer the Next Episode escape instead of stranding the user.
-                if (remaining > 90.0) {
+                if (movie || !playWhenReady || durationMs < 180000L) return false;
+                double durationSec = durationMs / 1000.0;
+                double remaining = durationSec - pos;
+                // Timer overruns the metadata end (remaining < 0, up to 5 min
+                // past it) once playback is warm: bogus short durations at
+                // startup must never summon the card mid-episode. Past a valid
+                // episode end with no ended event, the card is the escape.
+                if (remaining > 90.0 || remaining < -300.0) {
                     if (nextPill) hidePill(true);
                     return false;
+                }
+                if (remaining < 0 && steadyTicks < 3) {
+                    return false;
+                }
+                // Past a valid episode end with no ended event: advance once,
+                // hands-free, instead of stranding the user on a dead frame.
+                if (remaining <= -2.0 && !eofAutoAdvanced && steadyTicks >= 3
+                        && !IntroSkipPrefs.isManualMode(activity)) {
+                    eofAutoAdvanced = true;
+                    log("EOF overrun (" + fmt(pos) + "s / " + fmt(durationSec)
+                            + "s): auto-advancing to next episode");
+                    hidePill(false);
+                    playNextEpisode();
+                    return true;
                 }
                 if (pillShown && nextPill) {
                     refreshArmed(now);
@@ -728,6 +754,20 @@ public final class IntroSkipBridge {
 
         private void skip(Segment segment, boolean automatic, double pos, long durationMs) {
             double target = segment.endSeconds;
+            // Chain credits straight through an adjacent preview when both are
+            // auto: one seek instead of two, and the preview can never strand.
+            Segment chainedPreview = null;
+            if (segment.isCredits() && IntroSkipPrefs.isPreviewsEnabled(activity)
+                    && !IntroSkipPrefs.isManualMode(activity)) {
+                for (Segment s : segments) {
+                    if (s.isPreview() && Math.abs(s.startSeconds - segment.endSeconds) <= 1.5
+                            && s.endSeconds > target) {
+                        target = s.endSeconds;
+                        chainedPreview = s;
+                        break;
+                    }
+                }
+            }
             if (durationMs > 0 && target * 1000.0 > durationMs - 1000.0) {
                 target = Math.max(segment.startSeconds, (durationMs - 1000.0) / 1000.0);
             }
@@ -741,25 +781,28 @@ public final class IntroSkipBridge {
             }
             // Mark EOF-clamped skips too, so an end-of-file preview cannot loop back
             // into its own segment on the landing tick.
-            boolean clampedToEof = durationMs > 0 && segment.endSeconds * 1000.0 >= durationMs - 1500.0;
+            boolean clampedToEof = durationMs > 0 && target * 1000.0 >= durationMs - 1500.0;
             if (!automatic || target - pos >= 3.0 || clampedToEof) {
                 autoSkipped.add(segment.key());
+                if (chainedPreview != null) autoSkipped.add(chainedPreview.key());
             }
             guardUntil = SystemClock.uptimeMillis() + 2500L;
             guardTarget = target;
             guardSegment = automatic ? segment : null;
             landingCheckAt = SystemClock.uptimeMillis() + 1000L;
             current = null;
-            log((automatic ? "SKIP AUTO " : "SKIP MANUAL ") + segment.label + " " + fmt3(pos)
+            log((automatic ? "SKIP AUTO " : "SKIP MANUAL ") + segment.label
+                    + (chainedPreview != null ? "+preview " : " ") + fmt3(pos)
                     + "s -> " + fmt3(target) + "s (segment " + fmt3(segment.startSeconds) + "-"
                     + fmt3(segment.endSeconds) + ", source " + segment.source + ", seek " + mode + ")");
-            showNotice(segment.skippedText());
+            showNotice(chainedPreview != null ? chainedPreview.skippedText() : segment.skippedText());
         }
 
         /**
          * Stremio builds its ExoPlayer with SeekParameters.NEXT_SYNC: every seek lands on the
-         * next keyframe, seconds past the target. Our skip asks the playback thread for an EXACT
-         * seek and restores the original mode right after; the three messages run in order.
+         * next keyframe, seconds past the target. Our skip switches the playback thread to
+         * EXACT for the seek and restores the original mode after the guard window, because
+         * restoring immediately races the async seek and it still snaps to keyframes.
          */
         /**
          * Unwraps wrapper players down to the ExoPlayerImpl that owns
@@ -822,19 +865,26 @@ public final class IntroSkipBridge {
             if (exact) {
                 try {
                     exoSetSeek.invoke(exoInternal, exoExact);
+                    // Keep EXACT active while the async seek completes: restoring
+                    // NEXT_SYNC on the next line races the playback thread and
+                    // the seek still snaps to keyframes (verified in logcat).
+                    restoreSeekAt = SystemClock.uptimeMillis() + 2500L;
                 } catch (Throwable error) {
                     exact = false;
                 }
             }
             player.seekTo(targetMs);
-            if (exact) {
+            return exact ? "EXACT" : "default";
+        }
+
+        /** Restores the player's original seek parameters once the guard window ends. */
+        private void restoreSeekParameters() {
+            if (exoInternal != null && exoSetSeek != null && exoOriginal != null) {
                 try {
                     exoSetSeek.invoke(exoInternal, exoOriginal);
                 } catch (Throwable ignored) {
-                    // Next user seek simply stays exact.
                 }
             }
-            return exact ? "EXACT" : "default";
         }
 
         // ------------------------------------------------------------- media
@@ -1198,6 +1248,31 @@ public final class IntroSkipBridge {
                 }
                 if (!overlaps(out, candidate.startSeconds, candidate.endSeconds)) {
                     out.add(candidate);
+                }
+            }
+            // No preview from any source, but the file ends with a short final
+            // chapter right where the credits end (generic "Chapter 06" style
+            // Blu-ray muxes): that tail IS the post-ED preview. Infer it so
+            // generic-chapter files skip previews too. Never guess without the
+            // chapter boundary: no boundary, no segment.
+            if (!hasSegmentType(out, "preview") && chapters != null && !chapters.isEmpty() && runtime > 0) {
+                Segment creditsSeg = null;
+                for (Segment s : out) {
+                    if (s.isCredits()) {
+                        creditsSeg = s;
+                        break;
+                    }
+                }
+                MkvChapters.Chapter lastChap = chapters.get(chapters.size() - 1);
+                if (creditsSeg != null && lastChap != null) {
+                    double tailStart = creditsSeg.endSeconds;
+                    double tailEnd = lastChap.end > lastChap.start ? Math.max(lastChap.end, runtime) : runtime;
+                    double tailLen = tailEnd - tailStart;
+                    if (Math.abs(lastChap.start - tailStart) <= 1.5 && tailLen >= 4.0 && tailLen <= 35.0) {
+                        out.add(new Segment(tailStart, tailEnd, "preview", "tail-chapter"));
+                        pendingLogs.add("Inferred tail preview chapter " + fmt3(tailStart)
+                                + "-" + fmt3(tailEnd) + "s after credits");
+                    }
                 }
             }
             StringBuilder signature = new StringBuilder();
