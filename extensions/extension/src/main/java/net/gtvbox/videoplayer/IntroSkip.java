@@ -787,6 +787,33 @@ public final class IntroSkip implements Runnable {
                     merged.add(s);
                 }
             }
+            // No preview from any source: check the tail after credits. With no
+            // chapters at all, a short tail (4-16 s) is the post-ED preview;
+            // with chapters, the final boundary must sit right at credits end
+            // (same rule as Stremio's tail inference). Anything longer might be
+            // story and is left alone.
+            if (!hasSegType(merged, "Preview")) {
+                Seg creditsSeg = null;
+                for (Seg s : merged) {
+                    if (s.credits()) {
+                        creditsSeg = s;
+                        break;
+                    }
+                }
+                if (creditsSeg != null && duration > 0) {
+                    long tailLen = (long) duration - creditsSeg.end;
+                    if (tailLen >= 4000L && tailLen <= 16000L) {
+                        long[] starts = safeChapterStarts(p);
+                        boolean aligned = starts == null || starts.length == 0
+                                || Math.abs(starts[starts.length - 1] - creditsSeg.end) <= 1500L;
+                        if (aligned && !overlapsMs(merged, creditsSeg.end, duration)) {
+                            merged.add(new Seg(creditsSeg.end, duration, "Preview", "post-ed-tail"));
+                            Log.i(TAG, "Inferred post-ED tail preview " + creditsSeg.end
+                                    + "-" + duration + "ms (short tail after credits)");
+                        }
+                    }
+                }
+            }
             Collections.sort(merged, new Comparator<Seg>() {
                 @Override
                 public int compare(Seg a, Seg b) {
