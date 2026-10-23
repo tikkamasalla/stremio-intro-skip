@@ -206,6 +206,8 @@ public final class IntroSkip implements Runnable {
     private boolean chaptersHaveIntro;
     /** Online timestamps (AniSkip or IntroDB) for the episode; used when chapters give no intro. */
     private volatile List<Seg> remote;
+    /** Generation that produced remote; merge/apply only when it matches mediaGen. */
+    private volatile int remoteGen = -1;
     private boolean remoteStarted;
     private boolean remoteApplied;
     /** Bounded retries when the one-shot lookup yields nothing (same media only). */
@@ -745,8 +747,9 @@ public final class IntroSkip implements Runnable {
             remoteAttempts = 1;
             lastRemoteAttemptMs = now;
             startRemoteLookup(f, duration);
-        } else if (remoteStarted && (remote == null || !hasSegType(remote, "Credits")) && playingNow
-                && remoteAttempts < 3 && now - lastRemoteAttemptMs > 20000L) {
+        } else if (remoteStarted && playingNow && remoteAttempts < 3
+                && now - lastRemoteAttemptMs > 20000L
+                && (remoteGen != mediaGen || remote == null || !hasSegType(remote, "Credits")) {
             // Retry while the episode still lacks Credits (an OP-only answer
             // is not a complete one): bounded, same media only, then stop.
             remoteAttempts++;
@@ -754,11 +757,19 @@ public final class IntroSkip implements Runnable {
             Log.i(TAG, "Remote lookup incomplete, retrying (" + remoteAttempts + "/3)");
             startRemoteLookup(f, duration);
         }
-        List<Seg> fromRemote = remote;
+        // Only the current generation's remote: a stale thread's late result
+        // is retried away, never merged into the wrong episode.
+        List<Seg> fromRemote = (remoteGen == mediaGen) ? remote : null;
         if (!remoteApplied && fromRemote != null && !fromRemote.isEmpty() && chapterReads >= 1) {
             remoteApplied = true;
             inheritSeek = current != null && currentBySeek;
-            List<Seg> snapped = snapSegments(fromRemote, safeChapterStarts(p), duration);
+            List<Seg> snapped;
+            try {
+                snapped = snapSegments(fromRemote, safeChapterStarts(p), duration);
+            } catch (Throwable error) {
+                Log.w(TAG, "remote snap", error);
+                snapped = fromRemote;
+            }
             List<Seg> merged = new ArrayList<>();
             if (segments != null) {
                 merged.addAll(segments);
@@ -1237,8 +1248,16 @@ public final class IntroSkip implements Runnable {
                         ParsedMedia mapped = applyMalRemap(info, malMapped);
                         out = mergeRemote(ani, fetchIntroDb(ctx, mapped, durationMs));
                     }
+                    // Always stamp the outcome: a generation mismatch must be
+                    // visible in logcat, never a silent drop. Tick only merges
+                    // remote whose stamp matches the current media.
+                    remote = out;
+                    remoteGen = gen;
                     if (gen == mediaGen && out != null && !out.isEmpty()) {
-                        remote = out;
+                        Log.i(TAG, "Remote applied: " + out.size() + " segments (gen " + gen + ")");
+                    } else {
+                        Log.i(TAG, "Remote discarded: gen " + gen + " vs media " + mediaGen
+                                + ", n=" + (out == null ? -1 : out.size()));
                     }
                 } catch (Throwable error) {
                     Log.w(TAG, "Remote lookup failed: " + error);
@@ -2652,6 +2671,7 @@ public final class IntroSkip implements Runnable {
         segments = null;
         chaptersHaveIntro = false;
         remote = null;
+        remoteGen = -1;
         remoteStarted = false;
         remoteApplied = false;
         remoteAttempts = 0;
