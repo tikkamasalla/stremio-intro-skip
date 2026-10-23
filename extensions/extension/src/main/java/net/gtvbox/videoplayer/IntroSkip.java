@@ -147,6 +147,14 @@ public final class IntroSkip implements Runnable {
             + "|\\b(?:op\\d{0,2}|opening|intro(?:duction)?|recap|credits?)[\\s:_-]+end\\b");
     /** A bare "Credits" chapter: the opening credits near the start, the end credits near the end. */
     private static final Pattern CREDITS_NAME = Pattern.compile("(?i)(?:^|[^a-z])credits?(?:[^a-z]|$)");
+    /** End-credits chapter names (mirrors Stremio's CHAPTER_CREDITS): ED/ending/outro/credits
+     * in any language. Vimu exposes chapters natively, so these are exact and usable for skipping. */
+    private static final Pattern END_CREDITS_CHAPTER = Pattern.compile(
+            "(?i)(?:^|[^a-z])(?:ed\\d{0,2}|ending|outro|credits?|end credits|ending credits|closing credits"
+                    + "|end theme|ending theme|encerramento|generique de fin|abspann)(?:[^a-z]|$)|エンディング");
+    /** Next-preview chapter names (mirrors Stremio's CHAPTER_PREVIEW). Same deal: exact. */
+    private static final Pattern NEXT_PREVIEW_CHAPTER = Pattern.compile(
+            "(?i)(?:^|[^a-z])(?:preview|pv|teaser|next episode|trailer|apercu|vorschau)(?:[^a-z]|$)|予告");
     /** b) names that carry no meaning: "", "Chapter 1", "Chapter 01", "01", "00:01:25.000". */
     private static final Pattern GENERIC_NAME = Pattern.compile(
             "(?i)^\\s*(?:(?:chapter|chapitre|kapitel|cap[ií]tulo|capitolo|hoofdstuk|rozdział|глава|ch\\.?)\\s*)?\\d{0,3}\\s*$|^\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:[.,]\\d+)?\\s*$");
@@ -200,6 +208,9 @@ public final class IntroSkip implements Runnable {
     private volatile List<Seg> remote;
     private boolean remoteStarted;
     private boolean remoteApplied;
+    /** Bounded retries when the one-shot lookup yields nothing (same media only). */
+    private int remoteAttempts;
+    private long lastRemoteAttemptMs;
     private volatile int mediaGen;
     private long nextChapterRead;
     private int chapterReads;
@@ -265,12 +276,16 @@ public final class IntroSkip implements Runnable {
             return name != null && name.toLowerCase(Locale.US).matches(".*(recap|previously|あらすじ).*");
         }
 
-        /** Only the online "Credits" segments: a chapter named "Opening Credits" is a title sequence. */
+        /** Online "Credits" segments, plus end-credits chapters qualified below
+         * (Vimu exposes chapters natively; a chapter named "Opening Credits"
+         * is a title sequence, never this). */
         boolean credits() {
-            return "Credits".equals(name) && rule != null && rule.startsWith("introdb");
+            return "Credits".equals(name) && rule != null
+                    && (rule.startsWith("introdb") || rule.startsWith("skipdb")
+                    || rule.startsWith("chapter"));
         }
 
-        /** Only the online "Preview" segments (SkipDB): never chapters. */
+        /** "Preview" segments: SkipDB online ones plus qualified chapters (see loop (e)). */
         boolean preview() {
             return "Preview".equals(name);
         }
@@ -710,6 +725,16 @@ public final class IntroSkip implements Runnable {
         }
         if (!remoteStarted && duration > 0 && playingNow) {
             remoteStarted = true;
+            remoteAttempts = 1;
+            lastRemoteAttemptMs = now;
+            startRemoteLookup(f, duration);
+        } else if (remoteStarted && (remote == null || remote.isEmpty()) && playingNow
+                && remoteAttempts < 3 && now - lastRemoteAttemptMs > 20000L) {
+            // The one-shot lookup found nothing (or failed outright): retry a
+            // bounded number of times while the same media plays, then stop.
+            remoteAttempts++;
+            lastRemoteAttemptMs = now;
+            Log.i(TAG, "Remote lookup empty, retrying (" + remoteAttempts + "/3)");
             startRemoteLookup(f, duration);
         }
         List<Seg> fromRemote = remote;
@@ -835,6 +860,10 @@ public final class IntroSkip implements Runnable {
                 && (!autoModeForSeg || currentBySeek || buttonOnly) && !autoPending;
         if (shouldShowPill) {
             if (pillSegment != seg || !pillShown) {
+                Log.i(TAG, "Auto-gate blocked '" + seg.name + "': autoMode=" + autoModeForSeg
+                        + " currentBySeek=" + currentBySeek + " buttonOnly=" + buttonOnly
+                        + " wasSkipped=" + skipped.contains(seg.key())
+                        + " currentByJump=" + currentByJump + " flowing=" + flowing);
                 showButton(f, activity, seg);
             }
             refreshArmed(f, activity, now);
@@ -1147,14 +1176,20 @@ public final class IntroSkip implements Runnable {
             public void run() {
                 DEADLINE_MS.set(SystemClock.uptimeMillis() + LOOKUP_BUDGET_MS);
                 try {
-                    List<Seg> out = null;
+                    List<Seg> ani = null;
                     if (animeEnabled) {
-                        out = fetchAniSkip(ctx, info, durationMs);
+                        ani = fetchAniSkip(ctx, info, durationMs);
                     } else {
                         Log.i(TAG, "AniSkip skipped: disabled in settings");
                     }
-                    if ((out == null || out.isEmpty()) && gen == mediaGen) {
-                        out = fetchIntroDb(ctx, info, durationMs);
+                    // Always ask IntroDB too: AniSkip never serves Credits, so
+                    // "AniSkip hit, stop" would drop end credits every time.
+                    // The mapped season/episode reuses AniSkip's part-2 remap
+                    // (absolute "E19" -> S2E7) for the IMDb-keyed databases.
+                    List<Seg> out = ani;
+                    if (gen == mediaGen) {
+                        ParsedMedia mapped = mappedSeasonEpisode(ctx, info);
+                        out = mergeRemote(ani, fetchIntroDb(ctx, mapped, durationMs));
                     }
                     if (gen == mediaGen && out != null && !out.isEmpty()) {
                         remote = out;
@@ -1455,6 +1490,49 @@ public final class IntroSkip implements Runnable {
         return new ParsedMedia(clean, season, episode, year, animeHint, decoded);
     }
 
+    /**
+     * Part-2 absolute numbering ("E19") remapped to the season/episode the
+     * IMDb-keyed databases use ("S2E7"): resolveMalId already computes the
+     * offset for AniSkip, reuse its verdict here. Returns info unchanged on
+     * any failure.
+     */
+    private static ParsedMedia mappedSeasonEpisode(Context ctx, ParsedMedia info) {
+        try {
+            int[] mapped = resolveMalId(ctx, info.title, info.season, info.episode, info.looksLikeAnime);
+            int bump = mapped.length > 2 ? mapped[2] : 0;
+            if (bump > 0) {
+                Log.i(TAG, "AniList: season " + info.season + " episode " + info.episode
+                        + " remapped to season " + (info.season + bump) + " episode " + mapped[1]
+                        + " for IntroDB/SkipDB");
+                return new ParsedMedia(info.title, info.season + bump, mapped[1],
+                        info.year, info.looksLikeAnime, info.raw);
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "season remap failed", error);
+        }
+        return info;
+    }
+
+    /** AniSkip first; IntroDB/app/SkipDB fill the types AniSkip lacks (Credits et al). */
+    private static List<Seg> mergeRemote(List<Seg> primary, List<Seg> fallback) {
+        List<Seg> merged = new ArrayList<>();
+        if (primary != null) merged.addAll(primary);
+        if (fallback != null) {
+            for (Seg s : fallback) {
+                if (hasSegType(merged, s.name)) continue;
+                if (overlapsMs(merged, s.start, s.end)) continue;
+                merged.add(s);
+            }
+        }
+        Collections.sort(merged, new Comparator<Seg>() {
+            @Override
+            public int compare(Seg a, Seg b) {
+                return Integer.compare(a.start, b.start);
+            }
+        });
+        return merged;
+    }
+
     private static List<Seg> fetchAniSkip(Context ctx, ParsedMedia info, int durationMs) {
         List<Seg> out = new ArrayList<>();
         try {
@@ -1670,7 +1748,7 @@ public final class IntroSkip implements Runnable {
         double minScore = looksLikeAnime ? 0.60 : 0.95;
         double minSim = looksLikeAnime ? 0.50 : 0.85;
         if (bestId <= 0 || bestScore < minScore || bestSimilarity < minSim) {
-            return new int[]{0, episode};
+            return new int[]{0, episode, 0};
         }
 
         int offset = (bestIsPart2 && part1Episodes > 0 && episode > part1Episodes) ? part1Episodes : 0;
@@ -1680,7 +1758,7 @@ public final class IntroSkip implements Runnable {
             // Also record the part1 boundary on the base key so future episodes know where part 2 starts
             putCachedMal(ctx, cacheKey, bestId, part1Episodes, -1);
         }
-        return new int[]{bestId, episode - offset};
+        return new int[]{bestId, episode - offset, offset > 0 ? 1 : 0};
     }
 
     private static int[] getCachedMal(Context ctx, String key, int episode) {
@@ -1697,10 +1775,10 @@ public final class IntroSkip implements Runnable {
             int[] p2 = parseCacheEntry(part2Raw);
             if (p2 == null) return null;
             Log.i(TAG, "AniList cache hit (part 2) for '" + key + "' -> idMal=" + p2[0]);
-            return new int[]{p2[0], Math.max(1, episode - Math.max(0, p2[2]))};
+            return new int[]{p2[0], Math.max(1, episode - Math.max(0, p2[2])), p2[2] > 0 ? 1 : 0};
         }
         Log.i(TAG, "AniList cache hit for '" + key + "' -> idMal=" + malId);
-        return new int[]{malId, Math.max(1, episode - Math.max(0, offset))};
+        return new int[]{malId, Math.max(1, episode - Math.max(0, offset)), offset > 0 ? 1 : 0};
     }
 
     private static String getRawCacheEntry(Context ctx, String key) {
@@ -2507,6 +2585,8 @@ public final class IntroSkip implements Runnable {
         remote = null;
         remoteStarted = false;
         remoteApplied = false;
+        remoteAttempts = 0;
+        lastRemoteAttemptMs = 0;
         mediaGen++;
         chapterSignature = null;
         chapterReads = 0;
@@ -2937,10 +3017,41 @@ public final class IntroSkip implements Runnable {
         }
         boolean hasIntroSeg = false;
         for (Seg s : found) {
-            if (!s.recap()) {
+            if (!s.recap() && !"Credits".equals(s.name) && !s.preview()) {
                 hasIntroSeg = true;
                 break;
             }
+        }
+        // d) end-credits chapters (mirrors Stremio): Vimu exposes chapters natively
+        //    and these names are exact. Strict guards so story content is never taken:
+        //    ED/ending-style name, not an opening, not an early title sequence,
+        //    short label, sane length. A lone end-credits chapter never counts as
+        //    "intro" (online OP timings must still apply).
+        for (int i = 0; i < n; i++) {
+            String cname = names[i];
+            if (cname == null || !END_CREDITS_CHAPTER.matcher(cname).find()) continue;
+            if (OPENING_NAME.matcher(cname).find() || isIntroCredits(cname, starts[i], duration)) continue;
+            if (normTitle(cname).split(" ").length > 4) continue;
+            int end = endOf(starts, i, duration);
+            long lenMs = end > starts[i] ? (long) end - starts[i] : -1L;
+            if (lenMs < 15000L || lenMs > 480000L) continue;
+            if (overlapsMs(found, (int) starts[i], end)) continue;
+            found.add(new Seg((int) starts[i], end, "Credits", "chapter \"" + cname + "\""));
+            Log.i(TAG, "end-credits chapter '" + cname + "' " + starts[i] + "-" + end + "ms");
+        }
+        // e) next-preview chapters (mirrors Stremio): exact names, sane length.
+        // A lone preview chapter never counts as "intro" either.
+        for (int i = 0; i < n; i++) {
+            String cname = names[i];
+            if (cname == null || !NEXT_PREVIEW_CHAPTER.matcher(cname).find()) continue;
+            if (OPENING_NAME.matcher(cname).find()) continue;
+            if (normTitle(cname).split(" ").length > 4) continue;
+            int end = endOf(starts, i, duration);
+            long lenMs = end > starts[i] ? (long) end - starts[i] : -1L;
+            if (lenMs < 10000L || lenMs > 300000L) continue;
+            if (overlapsMs(found, (int) starts[i], end)) continue;
+            found.add(new Seg((int) starts[i], end, "Preview", "chapter \"" + cname + "\""));
+            Log.i(TAG, "preview chapter '" + cname + "' " + starts[i] + "-" + end + "ms");
         }
         // b) unnamed chapters: a 60-110 s chapter starting in the first 6 minutes. If several
         //    qualify (e.g. an 85 s cold open before a 90 s OP), take the one closest to 90 s,
