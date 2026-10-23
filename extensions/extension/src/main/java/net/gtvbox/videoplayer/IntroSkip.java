@@ -3128,7 +3128,7 @@ public final class IntroSkip implements Runnable {
             if (normTitle(cname).split(" ").length > 4) continue;
             int end = endOf(starts, i, duration);
             long lenMs = end > starts[i] ? (long) end - starts[i] : -1L;
-            if (lenMs < 10000L || lenMs > 300000L) continue;
+            if (lenMs < 5000L || lenMs > 300000L) continue;
             if (overlapsMs(found, (int) starts[i], end)) continue;
             found.add(new Seg((int) starts[i], end, "Preview", "chapter \"" + cname + "\""));
             Log.i(TAG, "preview chapter '" + cname + "' " + starts[i] + "-" + end + "ms");
