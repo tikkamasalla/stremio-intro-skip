@@ -678,7 +678,10 @@ public final class IntroSkipBridge {
                 if (noticeUntil != 0 && now <= noticeUntil) return false;
                 if (movie || !playWhenReady || durationMs <= 0) return false;
                 double remaining = durationMs / 1000.0 - pos;
-                if (remaining < 0 || remaining > 90.0) {
+                // Past the metadata end (position overruns duration on some
+                // HTTP streams): the player may never fire its ended event,
+                // so offer the Next Episode escape instead of stranding the user.
+                if (remaining > 90.0) {
                     if (nextPill) hidePill(true);
                     return false;
                 }
