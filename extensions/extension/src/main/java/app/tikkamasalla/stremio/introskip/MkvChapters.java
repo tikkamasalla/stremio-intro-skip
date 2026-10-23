@@ -52,14 +52,14 @@ final class MkvChapters {
         this.log = log;
     }
 
-    /** Never throws; an empty list means no usable chapters. */
+    /** Null on I/O failure (retryable); an empty list means the file cleanly has no chapters. */
     static List<Chapter> read(String url, Log log) {
         MkvChapters reader = new MkvChapters(url, log);
         try {
             reader.run();
         } catch (Throwable error) {
             log.log("Chapters: error " + error);
-            reader.chapters.clear();
+            return null;
         }
         return reader.chapters;
     }

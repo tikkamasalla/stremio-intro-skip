@@ -271,9 +271,6 @@ public final class IntroSkipBridge {
         private long restoreSeekAt;
         /** EOF auto-advance fired once per media (see maybeShowNext). */
         private boolean eofAutoAdvanced;
-        /** Duration stability tracking: a transient wrong duration must never trigger EOF logic. */
-        private long lastDurationMs = -1L;
-        private long durationStableSinceMs;
         private boolean exoLookedUp;
         private Object exoInternal;
         private Method exoSetSeek;
@@ -386,8 +383,6 @@ public final class IntroSkipBridge {
             skippedAt = 0;
             restoreSeekAt = 0;
             eofAutoAdvanced = false;
-            lastDurationMs = -1L;
-            durationStableSinceMs = 0;
             movie = false;
             segments.clear();
             autoSkipped.clear();
@@ -534,19 +529,17 @@ public final class IntroSkipBridge {
                 return;
             }
             combine(now);
-            // The chapter fetch sometimes yields nothing on flaky debrid hosts
-            // (or stalls forever): retry bounded, spaced out, same media only.
-            // Without chapters there are no chapter segments AND no tail-preview
-            // inference, so a single failed fetch silently disables both.
-            boolean chaptersEmpty = chaptersRequested && chaptersDone
-                    && (chapters == null || chapters.isEmpty());
+            // Retry a FAILED chapter fetch (null = I/O error), bounded and spaced.
+            // A clean empty result (chapterless file) is never retried: extra
+            // range connections risk the playback itself on strict hosts.
+            boolean chaptersFailed = chaptersRequested && chaptersDone && chapters == null;
             boolean chaptersStalled = chaptersRequested && !chaptersDone
                     && now - chaptersStartedAt > 30000L;
-            if ((chaptersEmpty || chaptersStalled) && chapterRetries < 3 && chapterUri != null
+            if ((chaptersFailed || chaptersStalled) && chapterRetries < 3 && chapterUri != null
                     && now - chaptersStartedAt > 15000L) {
                 chapterRetries++;
                 chaptersDone = false;
-                log("Chapters missing (" + (chaptersStalled ? "stalled" : "empty")
+                log("Chapters missing (" + (chaptersStalled ? "stalled" : "fetch failed")
                         + "), retrying fetch (" + chapterRetries + "/3)");
                 startChapters(chapterUri);
             }
@@ -576,10 +569,6 @@ public final class IntroSkipBridge {
             }
             lastPos = pos;
             lastPollAt = now;
-            if (durationMs != lastDurationMs) {
-                lastDurationMs = durationMs;
-                durationStableSinceMs = now;
-            }
             if (playing && firstPlayingAt == 0) firstPlayingAt = now;
             if (now - lastTraceAt >= 1000L && sysprop("debug.aniskip.trace")) {
                 lastTraceAt = now;
@@ -716,29 +705,25 @@ public final class IntroSkipBridge {
                 // Keep a "skipped" notice visible for its full 2.2 s, never clobber it
                 // with the next-episode pill on the tick right after a skip.
                 if (noticeUntil != 0 && now <= noticeUntil) return false;
-                if (movie || !playWhenReady || durationMs < 180000L) return false;
+                if (movie || !playWhenReady || durationMs <= 0) return false;
                 double durationSec = durationMs / 1000.0;
                 double remaining = durationSec - pos;
-                // Timer overruns the metadata end (remaining < 0, up to 5 min
-                // past it) once playback is warm: bogus short durations at
-                // startup must never summon the card mid-episode. Past a valid
-                // episode end with no ended event, the card is the escape.
                 if (remaining > 90.0 || remaining < -300.0) {
                     if (nextPill) hidePill(true);
                     return false;
                 }
-                if (remaining < 0 && steadyTicks < 3) {
+                // Guard negative remaining (timer overrun past the end) against
+                // mid-file duration glitches: short files, early positions and
+                // cold playback never summon the card.
+                if (remaining < 0 && (durationMs < 300000L || pos < 300.0 || steadyTicks < 5)) {
                     return false;
                 }
-                // At or a second past a stable episode end with no ended event:
-                // advance once, hands-free, instead of stranding the user on a
-                // dead frame. The stability gate keeps transient wrong durations
-                // (startup/manifest glitches) from ever triggering this.
-                if (remaining <= 1.0 && !eofAutoAdvanced && steadyTicks >= 3
-                        && now - durationStableSinceMs > 10000L
-                        && !IntroSkipPrefs.isManualMode(activity)) {
+                // Timer overruns the metadata end by 2 s+ with no ended event:
+                // advance once, hands-free. Duration-stability is enforced by
+                // the guards above (long warm playback near the real end).
+                if (remaining <= -2.0 && !eofAutoAdvanced && !IntroSkipPrefs.isManualMode(activity)) {
                     eofAutoAdvanced = true;
-                    log("EOF overrun (" + fmt(pos) + "s / " + fmt(durationSec)
+                    log("Timer overrun past duration (" + fmt(pos) + "s / " + fmt(durationSec)
                             + "s): auto-advancing to next episode");
                     hidePill(false);
                     playNextEpisode();
@@ -1176,6 +1161,10 @@ public final class IntroSkipBridge {
                             if (closed || generation != mediaGeneration) return;
                             chaptersDone = true;
                             chapters = found;
+                            if (found == null) {
+                                log("Chapters: fetch failed, will retry");
+                                return;
+                            }
                             StringBuilder list = new StringBuilder();
                             for (MkvChapters.Chapter c : found) {
                                 list.append("\n  ").append(fmt3(c.start)).append(" - ").append(fmt3(c.end))
@@ -1306,6 +1295,25 @@ public final class IntroSkipBridge {
                         out.add(new Segment(tailStart, tailEnd, "preview", "tail-chapter"));
                         pendingLogs.add("Inferred tail preview chapter " + fmt3(tailStart)
                                 + "-" + fmt3(tailEnd) + "s after credits");
+                    }
+                }
+            } else if (!hasSegmentType(out, "preview") && chaptersDone && runtime > 0) {
+                // Chapterless file (or chapters failed): no boundary to anchor on,
+                // so only a short tail can be a preview. Anything over 16 s might
+                // be a post-credits story scene and must never be auto-touched.
+                Segment creditsSeg = null;
+                for (Segment s : out) {
+                    if (s.isCredits()) {
+                        creditsSeg = s;
+                        break;
+                    }
+                }
+                if (creditsSeg != null) {
+                    double tailLen = runtime - creditsSeg.endSeconds;
+                    if (tailLen >= 4.0 && tailLen <= 16.0) {
+                        out.add(new Segment(creditsSeg.endSeconds, runtime, "preview", "post-ed-tail"));
+                        pendingLogs.add("Inferred post-ED tail preview " + fmt3(creditsSeg.endSeconds)
+                                + "-" + fmt3(runtime) + "s (no chapters, short tail)");
                     }
                 }
             }
