@@ -749,7 +749,7 @@ public final class IntroSkip implements Runnable {
             startRemoteLookup(f, duration);
         } else if (remoteStarted && playingNow && remoteAttempts < 3
                 && now - lastRemoteAttemptMs > 20000L
-                && (remoteGen != mediaGen || remote == null || !hasSegType(remote, "Credits")) {
+                && (remoteGen != mediaGen || remote == null || !hasSegType(remote, "Credits"))) {
             // Retry while the episode still lacks Credits (an OP-only answer
             // is not a complete one): bounded, same media only, then stop.
             remoteAttempts++;
