@@ -768,7 +768,6 @@ public final class ExternalProgress {
      * ends near position 0 and is already stopped by the 90% rule. Fails open.
      */
     public static boolean allowAutoNext(Object lambda) {
-    public static boolean allowAutoNext(Object lambda) {
         try {
             if (lambda == null) return true;
             Object fragment = field(lambda, "this$0");
