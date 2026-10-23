@@ -240,6 +240,9 @@ public final class IntroSkipBridge {
         private boolean movie;
         private boolean chaptersDone;
         private long chaptersStartedAt;
+        /** Bounded retries when the chapter fetch yields nothing (same media only). */
+        private int chapterRetries;
+        private Uri chapterUri;
         private List<MkvChapters.Chapter> chapters;
         private List<Segment> online;
         private String onlineSource;
@@ -390,6 +393,8 @@ public final class IntroSkipBridge {
             chaptersRequested = false;
             chaptersDone = false;
             chaptersStartedAt = 0;
+            chapterRetries = 0;
+            chapterUri = null;
             chapters = null;
             online = null;
             onlineSource = null;
@@ -524,6 +529,22 @@ public final class IntroSkipBridge {
                 return;
             }
             combine(now);
+            // The chapter fetch sometimes yields nothing on flaky debrid hosts
+            // (or stalls forever): retry bounded, spaced out, same media only.
+            // Without chapters there are no chapter segments AND no tail-preview
+            // inference, so a single failed fetch silently disables both.
+            boolean chaptersEmpty = chaptersRequested && chaptersDone
+                    && (chapters == null || chapters.isEmpty());
+            boolean chaptersStalled = chaptersRequested && !chaptersDone
+                    && now - chaptersStartedAt > 30000L;
+            if ((chaptersEmpty || chaptersStalled) && chapterRetries < 3 && chapterUri != null
+                    && now - chaptersStartedAt > 15000L) {
+                chapterRetries++;
+                chaptersDone = false;
+                log("Chapters missing (" + (chaptersStalled ? "stalled" : "empty")
+                        + "), retrying fetch (" + chapterRetries + "/3)");
+                startChapters(chapterUri);
+            }
 
             long elapsed = lastPollAt == 0 ? POLL_MS : now - lastPollAt;
             boolean jumpedBack = lastPos >= 0 && pos < lastPos - 0.75;
@@ -918,8 +939,9 @@ public final class IntroSkipBridge {
             }
             if (!chaptersRequested) {
                 chaptersRequested = true;
-                startChapters(item == null || item.localConfiguration == null ? null
-                        : item.localConfiguration.uri);
+                chapterUri = item == null || item.localConfiguration == null ? null
+                        : item.localConfiguration.uri;
+                startChapters(chapterUri);
             }
             if (loadedKey != null) {
                 if (fetchedLength == 0 && durationMs > 0 && pendingInfo != null) {
