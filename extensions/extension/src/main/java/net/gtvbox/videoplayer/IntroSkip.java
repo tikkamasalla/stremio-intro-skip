@@ -37,6 +37,7 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
@@ -155,6 +156,210 @@ public final class IntroSkip implements Runnable {
     /** Next-preview chapter names (mirrors Stremio's CHAPTER_PREVIEW). Same deal: exact. */
     private static final Pattern NEXT_PREVIEW_CHAPTER = Pattern.compile(
             "(?i)(?:^|[^a-z])(?:preview|pv|teaser|next episode|trailer|apercu|vorschau)(?:[^a-z]|$)|予告");
+
+    /** Strong prefix triggers at the start of a cue/line (after optional speaker/quote). */
+    private static final Pattern SUB_PREVIEW_PREFIX = Pattern.compile(
+            "(?iu)^(?:[\\s\"'\\u201C\\u201D\\u300C\\u300E\\(\\[]*(?:[A-Z0-9 ]{2,20}:\\s*)?)?(?:"
+            + "next\\s+time\\s+on\\b|on\\s+the\\s+next\\s+episode\\b|in\\s+the\\s+next\\s+episode\\b"
+            + "|next\\s+episode\\s*[:\\-\\u2013]|preview\\s*[:\\-\\u2013]"
+            + "|(?:dans\\s+le\\s+|au\\s+)?prochain\\s+[e\\u00E9]pisode\\b|la\\s+suite\\s+dans\\b"
+            + "|in\\s+der\\s+n[a\\u00E4]chsten\\s+folge\\b|n[a\\u00E4]chste\\s+folge\\b|vorschau\\s*[:\\-\\u2013]"
+            + "|(?:en\\s+el\\s+)?pr[o\\u00F3]ximo\\s+episodio\\b|siguiente\\s+episodio\\b|adelanto\\s*[:\\-\\u2013]"
+            + "|(?:no\\s+|cenas\\s+do\\s+)?pr[o\\u00F3]ximo\\s+epis[o\\u00F3]dio\\b|pr[e\\u00E9]via\\s*[:\\-\\u2013]"
+            + "|(?:nel\\s+)?prossimo\\s+episodio\\b|(?:nella\\s+)?prossima\\s+puntata\\b|anteprima\\s*[:\\-\\u2013]"
+            + "|в\\s+следующей\\s+серии\\b|следующая\\s+серия\\b|у\\s+наступному\\s+епізоді\\b|наступна\\s+серія\\b"
+            + "|w\\s+nast[e\\u0119]pnym\\s+odcinku\\b|nast[e\\u0119]pny\\s+odcinek\\b"
+            + "|次回予告|次回[\\s\\u3000:：、・「『]|予告[\\s\\u3000:：「『]"
+            + "|下[一]?[集回][预預]告|다음\\s*화\\s*예고|다음\\s*이야기"
+            + ")");
+
+    /** Standalone short header/title-card triggers (must be <= 4 words on their line). */
+    private static final Pattern SUB_PREVIEW_HEADER = Pattern.compile(
+            "(?iu)^(?:next\\s+episode|preview|prochain\\s+[e\\u00E9]pisode|apercu|aper\\u00E7u"
+            + "|vorschau|pr[o\\u00F3]ximo\\s+episodio|adelanto|pr[o\\u00F3]ximo\\s+epis[o\\u00F3]dio"
+            + "|prossimo\\s+episodio|anteprima|превью|анонс|zapowied[z\\u017A]|次回予告|次回|予告|下集预告|下集預告|예고)$");
+
+    /** Top-screen ASS positioning or episode-number title card immediately preceding the voiceover. */
+    private static final Pattern SUB_TITLE_CARD = Pattern.compile(
+            "(?iu)(?:\\{\\\\an[789]\\}|\\{\\\\pos\\(|^(?:episode\\s+\\d+|第[0-9０-９一二三四五六七八九十百]+話)\\b)");
+
+    private static final Pattern SRT_VTT_TIME = Pattern.compile(
+            "(?:(\\d{1,2}):)?(\\d{2}):(\\d{2})[,.](\\d{3})\\s*-->\\s*(?:(\\d{1,2}):)?(\\d{2}):(\\d{2})[,.](\\d{3})");
+
+    private static final class TimedCue {
+        final double startSec;
+        final double endSec;
+        final String rawText;
+
+        TimedCue(double startSec, double endSec, String rawText) {
+            this.startSec = startSec;
+            this.endSec = endSec;
+            this.rawText = rawText;
+        }
+    }
+
+    /** True when a single cue text matches preview boilerplate and passes false-positive guards. */
+    static boolean isPreviewBoilerplateCue(String rawCue) {
+        if (rawCue == null || rawCue.isEmpty()) return false;
+        if (rawCue.indexOf('\u266A') >= 0 || rawCue.indexOf('\u266B') >= 0) return false;
+        String noTags = rawCue.replaceAll("\\{\\\\[^}]*\\}", "")
+                .replaceAll("</?[a-zA-Z][^>]*>", "")
+                .replace('\r', '\n').trim();
+        if (noTags.isEmpty() || noTags.startsWith("#")) return false;
+        String[] lines = noTags.split("\n");
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i].trim();
+            if (line.isEmpty()) continue;
+            line = line.replaceFirst("^(?:[-\\u2013]\\s*)?(?:\\[[A-Z0-9 ]{2,20}\\]|[A-Z0-9 ]{2,20}:)\\s*", "").trim();
+            if (line.isEmpty()) continue;
+            if (SUB_PREVIEW_PREFIX.matcher(line).find()) {
+                if (line.endsWith("?") && !line.toLowerCase(Locale.ROOT).startsWith("next time on")) {
+                    continue;
+                }
+                return true;
+            }
+            String cleanHeader = line.replaceAll("^[\\s\"'\\u201C\\u201D\\u300C\\u300E\\(\\[:\\-]+|[\\s\"'\\u201C\\u201D\\u300D\\u300F\\)\\]:\\-.!]+$", "");
+            if (SUB_PREVIEW_HEADER.matcher(cleanHeader).matches()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Parses SRT/VTT text into timed cues and finds the preview start timestamp.
+     * Anchored strictly to >= creditsEndSec - 3.0s (when credits exist) and within the last 90s of runtime.
+     */
+    static double detectPreviewStartFromSubText(String body, double creditsEndSec, double runtimeSec) {
+        if (body == null || body.isEmpty() || runtimeSec < 300.0) return -1.0;
+        double minStart = creditsEndSec > 0
+                ? Math.max(creditsEndSec - 3.0, runtimeSec - 90.0)
+                : runtimeSec - 60.0;
+        double maxStart = runtimeSec - 3.0;
+        if (minStart >= maxStart) return -1.0;
+
+        List<TimedCue> tailCues = new ArrayList<>();
+        String norm = body.replace("\r\n", "\n").replace('\r', '\n');
+        String[] blocks = norm.split("\n[ \\t\\u00A0]*\n");
+        for (int b = 0; b < blocks.length; b++) {
+            String block = blocks[b].trim();
+            if (block.isEmpty()) continue;
+            String[] blockLines = block.split("\n");
+            int timeIdx = -1;
+            Matcher tm = null;
+            for (int i = 0; i < blockLines.length && i < 3; i++) {
+                Matcher m = SRT_VTT_TIME.matcher(blockLines[i]);
+                if (m.find()) {
+                    timeIdx = i;
+                    tm = m;
+                    break;
+                }
+            }
+            if (tm == null) continue;
+            double start = parseHmsMs(tm.group(1), tm.group(2), tm.group(3), tm.group(4));
+            double end = parseHmsMs(tm.group(5), tm.group(6), tm.group(7), tm.group(8));
+            if (start < minStart - 5.0 || start > maxStart) continue;
+            StringBuilder text = new StringBuilder();
+            for (int i = timeIdx + 1; i < blockLines.length; i++) {
+                String l = blockLines[i].trim();
+                if (l.isEmpty()) continue;
+                if (text.length() > 0) text.append('\n');
+                text.append(l);
+            }
+            if (text.length() > 0) {
+                tailCues.add(new TimedCue(start, end, text.toString()));
+            }
+        }
+
+        for (int i = 0; i < tailCues.size(); i++) {
+            TimedCue cue = tailCues.get(i);
+            if (cue.startSec < minStart) continue;
+            if (!isPreviewBoilerplateCue(cue.rawText)) continue;
+            if (creditsEndSec > 0 && cue.startSec >= creditsEndSec - 1.5
+                    && cue.startSec - creditsEndSec <= 5.0) {
+                return creditsEndSec;
+            }
+            if (i > 0) {
+                TimedCue prevCue = tailCues.get(i - 1);
+                if (prevCue.startSec >= minStart && cue.startSec - prevCue.startSec <= 3.5
+                        && SUB_TITLE_CARD.matcher(prevCue.rawText).find()) {
+                    return Math.max(minStart, prevCue.startSec - 0.2);
+                }
+            }
+            double floor = i > 0 ? Math.max(minStart, tailCues.get(i - 1).endSec) : minStart;
+            return Math.max(floor, cue.startSec - 0.4);
+        }
+        return -1.0;
+    }
+
+    private static double parseHmsMs(String h, String m, String s, String ms) {
+        return parseNum(h) * 3600.0 + parseNum(m) * 60.0 + parseNum(s) + parseNum(ms) / 1000.0;
+    }
+
+    private static int parseNum(String v) {
+        try {
+            if (v == null || v.isEmpty()) return 0;
+            return Integer.parseInt(v.trim());
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    /**
+     * Fetches the tail of an external .srt/.vtt URL: requests Range: bytes=-49152 first;
+     * if the server returns 200 OK, keeps only a 48 KB rolling tail buffer
+     * (capped at 512 KB total read) so memory and bandwidth stay minimal.
+     */
+    static String fetchSubtitleTail(String url) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", "Stremio");
+            conn.setRequestProperty("Range", "bytes=-49152");
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) return null;
+            InputStream in = conn.getInputStream();
+            if (in == null) return null;
+            final int keepBytes = 49152;
+            final int maxReadBytes = 524288;
+            byte[] ring = new byte[keepBytes];
+            int ringLen = 0;
+            int totalRead = 0;
+            byte[] buf = new byte[8192];
+            int n;
+            try {
+                while ((n = in.read(buf)) != -1) {
+                    totalRead += n;
+                    if (n >= keepBytes) {
+                        System.arraycopy(buf, n - keepBytes, ring, 0, keepBytes);
+                        ringLen = keepBytes;
+                    } else if (ringLen + n <= keepBytes) {
+                        System.arraycopy(buf, 0, ring, ringLen, n);
+                        ringLen += n;
+                    } else {
+                        int shift = (ringLen + n) - keepBytes;
+                        System.arraycopy(ring, shift, ring, 0, ringLen - shift);
+                        System.arraycopy(buf, 0, ring, ringLen - shift, n);
+                        ringLen = keepBytes;
+                    }
+                    if (totalRead >= maxReadBytes) break;
+                }
+            } finally {
+                try { in.close(); } catch (Throwable ignored) {}
+            }
+            if (ringLen <= 0) return null;
+            return new String(ring, 0, ringLen, StandardCharsets.UTF_8);
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            if (conn != null) {
+                try { conn.disconnect(); } catch (Throwable ignored) {}
+            }
+        }
+    }
     /** b) names that carry no meaning: "", "Chapter 1", "Chapter 01", "01", "00:01:25.000". */
     private static final Pattern GENERIC_NAME = Pattern.compile(
             "(?i)^\\s*(?:(?:chapter|chapitre|kapitel|cap[ií]tulo|capitolo|hoofdstuk|rozdział|глава|ch\\.?)\\s*)?\\d{0,3}\\s*$|^\\s*\\d{1,2}:\\d{2}(?::\\d{2})?(?:[.,]\\d+)?\\s*$");
@@ -209,6 +414,8 @@ public final class IntroSkip implements Runnable {
     /** Generation that produced remote; merge/apply only when it matches mediaGen. */
     private volatile int remoteGen = -1;
     private boolean remoteStarted;
+    /** Subtitle-tail preview scan fired once per media. */
+    private boolean subPreviewScanned;
     private boolean remoteApplied;
     /** Bounded retries when the one-shot lookup yields nothing (same media only). */
     private int remoteAttempts;
@@ -825,6 +1032,10 @@ public final class IntroSkip implements Runnable {
             for (Seg s : merged) {
                 Log.i(TAG, "final segment '" + s.name + "' " + s.start + "-" + s.end + "ms (source " + s.rule + ")");
             }
+        }
+        if (!subPreviewScanned && duration > 300000 && (remoteApplied || chapterReads >= 1)) {
+            subPreviewScanned = true;
+            maybeScanVimuSubPreview(f, duration);
         }
         if (segments == null || segments.isEmpty()) {
             if (pillShown) hidePill(true);
@@ -2703,6 +2914,7 @@ public final class IntroSkip implements Runnable {
         remoteApplied = false;
         remoteAttempts = 0;
         lastRemoteAttemptMs = 0;
+        subPreviewScanned = false;
         mediaGen++;
         chapterSignature = null;
         chapterReads = 0;
@@ -2716,6 +2928,76 @@ public final class IntroSkip implements Runnable {
         guardUntil = 0;
         lastPos = -1;
         hidePill(false);
+    }
+
+    /** One subtitle-tail lookahead per media: addon .srt/.vtt tails can name
+     * the preview when chapters and databases cannot. Fail-soft throughout. */
+    private void maybeScanVimuSubPreview(PlayerFragment f, final int durationMs) {
+        if (segments != null && hasSegType(segments, "Preview")) return;
+        String subUrl = extSubUrl;
+        if (subUrl == null || !(subUrl.startsWith("http://") || subUrl.startsWith("https://"))) {
+            try {
+                Activity act = f == null ? null : f.getActivity();
+                Intent intent = act == null ? null : act.getIntent();
+                if (intent != null) {
+                    String forced = intent.getStringExtra("forcedsrt");
+                    if (forced != null && (forced.startsWith("http://") || forced.startsWith("https://"))) {
+                        subUrl = forced;
+                    } else {
+                        android.os.Parcelable[] uris = intent.getParcelableArrayExtra("subs");
+                        if (uris != null && uris.length > 0 && uris[0] != null) {
+                            String u = uris[0].toString();
+                            if (u.startsWith("http://") || u.startsWith("https://")) subUrl = u;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (subUrl == null || subUrl.isEmpty()) return;
+        final String targetUrl = subUrl;
+        final int gen = mediaGen;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    String tail = fetchSubtitleTail(targetUrl);
+                    if (tail == null || tail.isEmpty()) return;
+                    double credEndSec = -1.0;
+                    List<Seg> cur = segments;
+                    if (cur != null) {
+                        for (Seg s : cur) {
+                            if (s.credits()) {
+                                credEndSec = s.end / 1000.0;
+                                break;
+                            }
+                        }
+                    }
+                    double startSec = detectPreviewStartFromSubText(tail, credEndSec, durationMs / 1000.0);
+                    if (startSec <= 0) return;
+                    final int startMs = (int) Math.round(startSec * 1000.0);
+                    MAIN.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (!running || gen != mediaGen || durationMs - startMs < 3500) return;
+                            List<Seg> list = segments == null ? new ArrayList<Seg>() : new ArrayList<Seg>(segments);
+                            if (hasSegType(list, "Preview")) return;
+                            list.add(new Seg(startMs, durationMs, "Preview", "subtitle-cue"));
+                            Collections.sort(list, new Comparator<Seg>() {
+                                @Override
+                                public int compare(Seg a, Seg b) {
+                                    return Integer.compare(a.start, b.start);
+                                }
+                            });
+                            segments = list;
+                            Log.i(TAG, "final segment 'Preview' " + startMs + "-" + durationMs
+                                    + "ms (source subtitle-cue)");
+                        }
+                    });
+                } catch (Throwable ignored) {
+                }
+            }
+        }, "VimuSubPreview").start();
     }
 
     private static String chapterSignature(e p) {
