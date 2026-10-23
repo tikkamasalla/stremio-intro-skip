@@ -1322,14 +1322,6 @@ public final class IntroSkipBridge {
                 pill.setTextColor(0xFFF2F4F8);
                 textCol.addView(pill);
 
-                pillSub = new TextView(activity);
-                pillSub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-                pillSub.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-                pillSub.setSingleLine(true);
-                pillSub.setTextColor(0xFF9EA6B8);
-                pillSub.setVisibility(View.GONE);
-                textCol.addView(pillSub);
-
                 LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 textLp.setMargins(0, 0, dp(14), 0);
@@ -1345,18 +1337,6 @@ public final class IntroSkipBridge {
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
                 pillCard.addView(row);
-
-                FrameLayout track = new FrameLayout(activity);
-                track.setBackgroundColor(0x26FFFFFF);
-                pillProgressTrack = track;
-                pillProgressFill = new View(activity);
-                pillProgressFill.setBackgroundColor(accent);
-                pillProgressFill.setPivotX(0f);
-                pillProgressFill.setScaleX(0f);
-                track.addView(pillProgressFill, new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-                pillCard.addView(track, new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
 
                 FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1733,33 +1713,6 @@ public final class IntroSkipBridge {
                 float lift = controlsVisible() ? -dp(56) : 0f;
                 if (Math.abs(target.getTranslationY() - lift) > 0.5f) {
                     target.animate().translationY(lift).setDuration(180L).start();
-                }
-                if (pillCard != null && noticeUntil == 0) {
-                    double progress = 0.0;
-                    int remSec = -1;
-                    if (pillSegment != null && lastPos >= pillSegment.startSeconds) {
-                        double total = Math.max(1.0, pillSegment.endSeconds - pillSegment.startSeconds);
-                        progress = Math.min(1.0, Math.max(0.0, (lastPos - pillSegment.startSeconds) / total));
-                        remSec = Math.max(0, (int) Math.ceil(pillSegment.endSeconds - lastPos));
-                    } else if (nextPill && player != null) {
-                        long dur = player.getDuration();
-                        if (dur > 0 && lastPos >= 0) {
-                            double rem = Math.max(0.0, dur / 1000.0 - lastPos);
-                            progress = Math.min(1.0, Math.max(0.0, (90.0 - rem) / 90.0));
-                            remSec = (int) Math.ceil(rem);
-                        }
-                    }
-                    if (pillProgressFill != null) {
-                        pillProgressFill.setScaleX((float) progress);
-                    }
-                    if (pillSub != null) {
-                        if (remSec >= 0) {
-                            pillSub.setVisibility(View.VISIBLE);
-                            pillSub.setText((armed ? "Press OK · " : "Press Down · ") + remSec + "s left");
-                        } else {
-                            pillSub.setVisibility(View.GONE);
-                        }
-                    }
                 }
             } catch (Throwable ignored) {
             }
