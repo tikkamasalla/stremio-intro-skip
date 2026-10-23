@@ -1621,7 +1621,7 @@ public final class IntroSkip implements Runnable {
             int malId = mapped == null || mapped.length < 2 ? 0 : mapped[0];
             int episode = mapped == null || mapped.length < 2 ? fallbackEpisode : mapped[1];
             if (malId <= 0) {
-                Log.i(TAG, "AniSkip: no confident MAL id for '" + info.title + "'");
+                Log.i(TAG, "AniSkip: no confident MAL id (malId=" + malId + ")");
                 return out;
             }
             if (episode != fallbackEpisode) {
