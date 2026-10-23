@@ -232,6 +232,7 @@ public final class SdhAvoid {
 
         private void resetMedia() {
             mediaKey = "";
+            activeEnglish = false;
             switchedAway.clear();
             sdhContent.clear();
             sample.clear();

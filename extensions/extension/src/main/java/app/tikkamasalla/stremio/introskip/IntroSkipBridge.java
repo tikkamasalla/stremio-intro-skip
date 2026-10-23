@@ -274,10 +274,7 @@ public final class IntroSkipBridge {
         private TextView pill;
         private LinearLayout pillCard;
         private View pillIcon;
-        private TextView pillSub;
         private TextView pillBadge;
-        private View pillProgressTrack;
-        private View pillProgressFill;
         private int accentColor = 0xFF5B67F1;
         private boolean accentResolved;
         private boolean pillShown;
@@ -558,9 +555,12 @@ public final class IntroSkipBridge {
                 log("Position 1 s after skip: " + fmt3(pos) + "s (target " + fmt3(guardTarget) + "s)");
             }
             if (guardUntil != 0) {
-                // Right after our own seek: positions can lag (VLC) or still read the old
-                // spot for a frame. Never re-evaluate the segment we just left.
-                if (now < guardUntil && pos < guardTarget - 0.5) {
+                // Wait out the full guard window (plus any seek buffering) before
+                // judging the landing: ExoPlayer masks getCurrentPosition() to the
+                // seek target immediately, before decoding catches up. Acting on
+                // the masked position clears the guard while the seek is in flight.
+                boolean seekBuffering = state == Player.STATE_BUFFERING && now - skippedAt < 6000L;
+                if (now < guardUntil || seekBuffering) {
                     updatePillPosition();
                     if (noticeUntil != 0 && now > noticeUntil) hidePill(true);
                     return;
@@ -591,7 +591,11 @@ public final class IntroSkipBridge {
                 currentByJump = segment != null && jumped;
                 double lag = segment == null ? 0.0 : pos - segment.startSeconds;
                 boolean warm = firstPlayingAt != 0 && now - firstPlayingAt > 3000L;
-                boolean forwardLagBlocked = segment != null && !segment.isPreview() && lag >= 15.0;
+                // Previews and auto-credits are exempt from the forward-lag rule:
+                // both sit where everyone fast-forwards (post-credits tail),
+                // so a deep landing there must not latch "user seek".
+                boolean forwardLagBlocked = segment != null && !segment.isPreview()
+                        && !(segment.isCredits() && wantsAuto(segment)) && lag >= 15.0;
                 boolean deliberateSeek = segment != null && warm
                         && ((jumpedBack && now - lastSeekKeyAt < 3000L)
                         || (jumpedForward && now - lastSeekKeyAt < 1200L
@@ -754,16 +758,51 @@ public final class IntroSkipBridge {
          * next keyframe, seconds past the target. Our skip asks the playback thread for an EXACT
          * seek and restores the original mode right after; the three messages run in order.
          */
+        /**
+         * Unwraps wrapper players down to the ExoPlayerImpl that owns
+         * internalPlayer/seekParameters: ForwardingPlayer chain first, then any
+         * Player-typed field (StremioPlayer keeps its ExoPlayer that way).
+         */
+        private static Player unwrapExoPlayer(Player root) {
+            Player current = root;
+            for (int depth = 0; depth < 6 && current != null; depth++) {
+                if (findField(current.getClass(), "internalPlayer") != null) return current;
+                if (current instanceof androidx.media3.common.ForwardingPlayer) {
+                    Player next = ((androidx.media3.common.ForwardingPlayer) current).getWrappedPlayer();
+                    if (next != null && next != current) {
+                        current = next;
+                        continue;
+                    }
+                }
+                Player found = null;
+                for (Class<?> c = current.getClass(); c != null && c != Object.class && found == null;
+                        c = c.getSuperclass()) {
+                    try {
+                        for (Field f : c.getDeclaredFields()) {
+                            if (!Player.class.isAssignableFrom(f.getType())) continue;
+                            f.setAccessible(true);
+                            Object val = f.get(current);
+                            if (val instanceof Player && val != current) {
+                                found = (Player) val;
+                                break;
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (found != null) current = found;
+                else break;
+            }
+            return current;
+        }
+
         private String exactSeek(long targetMs) {
             if (!exoLookedUp) {
                 exoLookedUp = true;
                 try {
-                    Player raw = player;
-                    for (int i = 0; i < 4 && raw instanceof androidx.media3.common.ForwardingPlayer; i++) {
-                        raw = ((androidx.media3.common.ForwardingPlayer) raw).getWrappedPlayer();
-                    }
-                    Field internal = findField(raw.getClass(), "internalPlayer");
-                    Field params = findField(raw.getClass(), "seekParameters");
+                    Player raw = unwrapExoPlayer(player);
+                    Field internal = raw == null ? null : findField(raw.getClass(), "internalPlayer");
+                    Field params = raw == null ? null : findField(raw.getClass(), "seekParameters");
                     if (internal != null && params != null) {
                         Class<?> type = params.getType();
                         exoInternal = internal.get(raw);
@@ -1407,8 +1446,6 @@ public final class IntroSkipBridge {
                     pillCard.setBackground(roundedBackground(0xEB101216, accent, dp(12)));
                     pill.setTextColor(0xFFF2F4F8);
                     if (pillBadge != null) pillBadge.setVisibility(View.GONE);
-                    if (pillSub != null) pillSub.setVisibility(View.GONE);
-                    if (pillProgressTrack != null) pillProgressTrack.setVisibility(View.GONE);
                 } else if (isArmed) {
                     pillCard.setBackground(roundedBackground(0xF51A1E25, accent, dp(12)));
                     pill.setTextColor(0xFFFFFFFF);
@@ -1418,7 +1455,6 @@ public final class IntroSkipBridge {
                         pillBadge.setTextColor(0xFFFFFFFF);
                         pillBadge.setBackground(roundedBackground(accent, accent, dp(6)));
                     }
-                    if (pillProgressTrack != null) pillProgressTrack.setVisibility(View.VISIBLE);
                     pillCard.animate().scaleX(1.03f).scaleY(1.03f).setDuration(140L).start();
                 } else {
                     pillCard.setBackground(roundedBackground(0xD9101216, 0xFF303743, dp(12)));
@@ -1429,7 +1465,6 @@ public final class IntroSkipBridge {
                         pillBadge.setTextColor(0xFF9EA6B8);
                         pillBadge.setBackground(roundedBackground(0xFF252B35, 0xFF3E4756, dp(6)));
                     }
-                    if (pillProgressTrack != null) pillProgressTrack.setVisibility(View.VISIBLE);
                     pillCard.animate().scaleX(0.98f).scaleY(0.98f).setDuration(140L).start();
                 }
                 if (pillIcon != null) pillIcon.invalidate();
@@ -1508,17 +1543,30 @@ public final class IntroSkipBridge {
                 }
                 try {
                     Object vm = viewModelOf(frag);
-                    Object flow = vm.getClass().getMethod("getState").invoke(vm);
-                    Object st = flow.getClass().getMethod("getValue").invoke(flow);
-                    try {
-                        st.getClass().getMethod("getNextVideo");
-                        vm.getClass().getMethod("onStateChange", Class.forName(
-                                "com.stremio.common.viewmodels.state.VideoPlaybackState$NextVideo"));
-                    } catch (Throwable ignored2) {
-                        // State event is optional; navigation still plays next.
+                    if (vm != null) {
+                        ClassLoader cl = vm.getClass().getClassLoader();
+                        Class<?> stateClass = Class.forName(
+                                "com.stremio.common.viewmodels.state.VideoPlaybackState", false, cl);
+                        Class<?> nextClass = Class.forName(
+                                "com.stremio.common.viewmodels.state.VideoPlaybackState$NextVideo", false, cl);
+                        Object nextEvent = null;
+                        try {
+                            Field inst = nextClass.getDeclaredField("INSTANCE");
+                            inst.setAccessible(true);
+                            nextEvent = inst.get(null);
+                        } catch (Throwable noSingleton) {
+                            java.lang.reflect.Constructor<?> ctor = nextClass.getDeclaredConstructor();
+                            ctor.setAccessible(true);
+                            nextEvent = ctor.newInstance();
+                        }
+                        if (nextEvent != null) {
+                            Method onStateChange = vm.getClass().getMethod("onStateChange", stateClass);
+                            onStateChange.invoke(vm, nextEvent);
+                            log("Next episode: dispatched VideoPlaybackState$NextVideo");
+                        }
                     }
                 } catch (Throwable ignored) {
-                    // Navigation without the state event still works.
+                    // State event is optional; navigation still plays next.
                 }
                 nav.invoke(frag, video);
                 log("Next episode: navigateToVideo");
@@ -2287,17 +2335,19 @@ public final class IntroSkipBridge {
                     || normTitle(chapter.name).split(" ").length > 4) continue;
             boolean intro = weak ? CHAPTER_WEAK_INTRO.matcher(chapter.name).find()
                     && !CHAPTER_INTRO.matcher(chapter.name).find() : CHAPTER_INTRO.matcher(chapter.name).find();
-            // "Opening Credits" or an early "Credits" chapter is the start of the episode, not its end.
+            // "Opening Credits" or an early "Credits" chapter is the start of the episode, not its end:
+            // end credits must start in the back half (a cold-open credit roll after a long
+            // prologue is not the outro).
             String lower = chapter.name.toLowerCase(Locale.ROOT);
-            boolean allowCredits = !(lower.contains("opening") || lower.contains("main title")
-                    || (lower.contains("credits") && (runtime <= 0 || chapter.start < runtime * 0.25)));
+            boolean allowCredits = !(lower.contains("opening") || lower.contains("main title"))
+                    && (runtime <= 0 ? chapter.start >= 600.0 : chapter.start >= runtime * 0.50);
             if (intro && length >= 15 && length <= 240) {
                 matched[i] = new Segment(chapter.start, end, "OP", "chapter \"" + chapter.name + "\"");
             } else if (!weak && CHAPTER_RECAP.matcher(chapter.name).find() && length >= 10 && length <= 360) {
                 matched[i] = new Segment(chapter.start, end, "recap", "chapter \"" + chapter.name + "\"");
             } else if (!weak && allowCredits && CHAPTER_CREDITS.matcher(chapter.name).find() && length >= 15 && length <= 480) {
                 matched[i] = new Segment(chapter.start, end, "credits", "chapter \"" + chapter.name + "\"");
-            } else if (!weak && CHAPTER_PREVIEW.matcher(chapter.name).find() && length >= 10 && length <= 300) {
+            } else if (!weak && CHAPTER_PREVIEW.matcher(chapter.name).find() && length >= 5 && length <= 300) {
                 matched[i] = new Segment(chapter.start, end, "preview", "chapter \"" + chapter.name + "\"");
             }
         }
