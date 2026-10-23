@@ -41,6 +41,7 @@ import android.widget.Toast;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.Player;
+import androidx.media3.common.Tracks;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -271,6 +272,9 @@ public final class IntroSkipBridge {
         private long restoreSeekAt;
         /** EOF auto-advance fired once per media (see maybeShowNext). */
         private boolean eofAutoAdvanced;
+        /** Subtitle-tail preview scan fired once per media. */
+        private boolean subPreviewRequested;
+        private final Set<String> subUrlsChecked = new HashSet<>();
         private boolean exoLookedUp;
         private Object exoInternal;
         private Method exoSetSeek;
@@ -308,6 +312,22 @@ public final class IntroSkipBridge {
                 log("Landing " + (reason == Player.DISCONTINUITY_REASON_SEEK ? "seek" : "adjusted keyframe")
                         + ": " + fmt3(oldPosition.positionMs / 1000.0) + "s -> "
                         + fmt3(newPosition.positionMs / 1000.0) + "s");
+            }
+
+            @Override
+            public void onTracksChanged(Tracks tracks) {
+                try {
+                    if (!closed && !movie) maybeStartSubPreviewScan();
+                } catch (Throwable ignored) {
+                }
+            }
+
+            @Override
+            public void onCues(androidx.media3.common.text.CueGroup cueGroup) {
+                try {
+                    if (!closed && !movie) onLiveCues(cueGroup);
+                } catch (Throwable ignored) {
+                }
             }
         };
 
@@ -383,6 +403,8 @@ public final class IntroSkipBridge {
             skippedAt = 0;
             restoreSeekAt = 0;
             eofAutoAdvanced = false;
+            subPreviewRequested = false;
+            subUrlsChecked.clear();
             movie = false;
             segments.clear();
             autoSkipped.clear();
@@ -698,6 +720,151 @@ public final class IntroSkipBridge {
                 maybeShowNext(pos, durationMs, playWhenReady, now);
             }
             updatePillPosition();
+        }
+
+        private double currentCreditsEndSeconds() {
+            for (Segment s : segments) {
+                if (s.isCredits()) return s.endSeconds;
+            }
+            return -1.0;
+        }
+
+        /** Collects up to 2 addon subtitle URLs from Media3 Tracks or Stremio's PlayerViewModel. */
+        private List<String> collectCandidateSubUrls() {
+            List<String> urls = new ArrayList<>();
+            try {
+                if (player != null) {
+                    Tracks tracks = player.getCurrentTracks();
+                    for (Tracks.Group g : tracks.getGroups()) {
+                        if (g.getType() != androidx.media3.common.C.TRACK_TYPE_TEXT) continue;
+                        for (int i = 0; i < g.length; i++) {
+                            androidx.media3.common.Format f = g.getTrackFormat(i);
+                            String id = f == null ? null : f.id;
+                            if (id != null && (id.startsWith("http://") || id.startsWith("https://"))) {
+                                if (g.isTrackSelected(i)) urls.add(0, id);
+                                else if (!urls.contains(id)) urls.add(id);
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            if (!urls.isEmpty()) return urls;
+            try {
+                Object frag = resolveFragment();
+                Object vm = frag == null ? null : viewModelOf(frag);
+                if (vm != null) {
+                    Object flow = vm.getClass().getMethod("getState").invoke(vm);
+                    Object state = flow == null ? null : flow.getClass().getMethod("getValue").invoke(flow);
+                    Object subsMap = state == null ? null : state.getClass().getMethod("getSubtitles").invoke(state);
+                    Method proxied = vm.getClass().getMethod("proxiedSubtitlesUri",
+                            Class.forName("com.stremio.core.types.resource.Subtitle", false,
+                                    vm.getClass().getClassLoader()));
+                    if (subsMap instanceof Map) {
+                        for (Object listObj : ((Map<?, ?>) subsMap).values()) {
+                            if (!(listObj instanceof List)) continue;
+                            for (Object sub : (List<?>) listObj) {
+                                if (sub == null) continue;
+                                Object uri = proxied.invoke(vm, sub);
+                                if (uri != null) {
+                                    String u = uri.toString();
+                                    if (u.startsWith("http://") || u.startsWith("https://")) {
+                                        urls.add(u);
+                                        if (urls.size() >= 2) return urls;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            return urls;
+        }
+
+        private void maybeStartSubPreviewScan() {
+            if (closed || movie || hasSegmentType(segments, "preview")) return;
+            final double runtime = runtimeSeconds();
+            if (runtime < 300.0) return;
+            List<String> candidates = collectCandidateSubUrls();
+            String targetUrl = null;
+            for (String u : candidates) {
+                if (subUrlsChecked.add(u)) {
+                    targetUrl = u;
+                    break;
+                }
+            }
+            if (targetUrl == null || subUrlsChecked.size() > 2) return;
+            subPreviewRequested = true;
+            final String urlToFetch = targetUrl;
+            final int gen = mediaGeneration;
+            NETWORK.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final String tail = fetchSubtitleTail(urlToFetch);
+                    if (tail == null || tail.isEmpty()) return;
+                    MAIN.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (closed || gen != mediaGeneration || hasSegmentType(segments, "preview")) return;
+                            double rt = runtimeSeconds();
+                            double credEnd = currentCreditsEndSeconds();
+                            double start = detectPreviewStartFromSubText(tail, credEnd, rt);
+                            if (start > 0 && rt - start >= 3.5) {
+                                Segment prev = new Segment(start, rt, "preview", "subtitle-cue");
+                                trimCreditsBeforePreview(segments, prev, null);
+                                segments.add(prev);
+                                Collections.sort(segments, new java.util.Comparator<Segment>() {
+                                    @Override
+                                    public int compare(Segment a, Segment b) {
+                                        return Double.compare(a.startSeconds, b.startSeconds);
+                                    }
+                                });
+                                log("Subtitle preview detected (" + fmt3(start) + "-" + fmt3(rt)
+                                        + "s) from addon subtitle tail");
+                            } else {
+                                log("Subtitle preview scan: no tail trigger in " + clipUrl(urlToFetch));
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        /** Live fallback for embedded MKV text tracks where no external URL exists. */
+        private void onLiveCues(androidx.media3.common.text.CueGroup cueGroup) {
+            if (cueGroup == null || cueGroup.cues == null || cueGroup.cues.isEmpty()) return;
+            if (hasSegmentType(segments, "preview")) return;
+            double runtime = runtimeSeconds();
+            if (runtime < 300.0 || lastPos < 0) return;
+            double credEnd = currentCreditsEndSeconds();
+            double minPos = credEnd > 0
+                    ? Math.max(credEnd - 3.0, runtime - 90.0)
+                    : runtime - 60.0;
+            if (lastPos < minPos || lastPos > runtime - 2.0) return;
+
+            for (Object item : cueGroup.cues) {
+                if (!(item instanceof androidx.media3.common.text.Cue)) continue;
+                CharSequence text = ((androidx.media3.common.text.Cue) item).text;
+                if (text == null) continue;
+                String raw = text.toString();
+                if (isPreviewBoilerplateCue(raw)) {
+                    double start = (credEnd > 0 && lastPos >= credEnd - 1.5 && lastPos - credEnd <= 5.0)
+                            ? credEnd : Math.max(minPos, lastPos - 0.2);
+                    Segment prev = new Segment(start, runtime, "preview", "live-cue");
+                    segments.add(prev);
+                    log("Live subtitle preview detected at " + fmt3(lastPos)
+                            + "s -> segment " + fmt3(start) + "-" + fmt3(runtime) + "s");
+                    MAIN.post(precise);
+                    return;
+                }
+            }
+        }
+
+        private static String clipUrl(String url) {
+            if (url == null) return "";
+            int q = url.indexOf('?');
+            return q > 0 ? url.substring(0, Math.min(q, 80)) : url.substring(0, Math.min(url.length(), 80));
         }
 
         private boolean maybeShowNext(double pos, long durationMs, boolean playWhenReady, long now) {
@@ -1326,6 +1493,7 @@ public final class IntroSkipBridge {
             appliedSignature = sig;
             apply(out, onlineSource == null ? "chapters" : onlineSource, onlineStartedAt == 0
                     ? chaptersStartedAt : onlineStartedAt);
+            if (!subPreviewRequested && (introDone || chaptersDone)) maybeStartSubPreviewScan();
         }
 
         private double runtimeSeconds() {
@@ -2430,6 +2598,211 @@ public final class IntroSkipBridge {
     private static final Pattern CHAPTER_PREVIEW = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:preview|pv|teaser|"
             + "next episode|trailer|apercu|vorschau|у наступному епізоді|в следующей серии|превью)(?![\\s:_-]+end\\b)(?:$|[^\\p{L}])|予告");
     private static final Pattern CHAPTER_NOT = Pattern.compile("(?iu)(?:^|[^\\p{L}])(?:eyecatch)(?:$|[^\\p{L}])");
+
+    /** Strong prefix triggers at the start of a cue/line (after optional speaker/quote). */
+    private static final Pattern SUB_PREVIEW_PREFIX = Pattern.compile(
+            "(?iu)^(?:[\\s\"'\\u201C\\u201D\\u300C\\u300E\\(\\[]*(?:[A-Z0-9 ]{2,20}:\\s*)?)?(?:"
+            + "next\\s+time\\s+on\\b|on\\s+the\\s+next\\s+episode\\b|in\\s+the\\s+next\\s+episode\\b"
+            + "|next\\s+episode\\s*[:\\-\\u2013]|preview\\s*[:\\-\\u2013]"
+            + "|(?:dans\\s+le\\s+|au\\s+)?prochain\\s+[e\\u00E9]pisode\\b|la\\s+suite\\s+dans\\b"
+            + "|in\\s+der\\s+n[a\\u00E4]chsten\\s+folge\\b|n[a\\u00E4]chste\\s+folge\\b|vorschau\\s*[:\\-\\u2013]"
+            + "|(?:en\\s+el\\s+)?pr[o\\u00F3]ximo\\s+episodio\\b|siguiente\\s+episodio\\b|adelanto\\s*[:\\-\\u2013]"
+            + "|(?:no\\s+|cenas\\s+do\\s+)?pr[o\\u00F3]ximo\\s+epis[o\\u00F3]dio\\b|pr[e\\u00E9]via\\s*[:\\-\\u2013]"
+            + "|(?:nel\\s+)?prossimo\\s+episodio\\b|(?:nella\\s+)?prossima\\s+puntata\\b|anteprima\\s*[:\\-\\u2013]"
+            + "|в\\s+следующей\\s+серии\\b|следующая\\s+серия\\b|у\\s+наступному\\s+епізоді\\b|наступна\\s+серія\\b"
+            + "|w\\s+nast[e\\u0119]pnym\\s+odcinku\\b|nast[e\\u0119]pny\\s+odcinek\\b"
+            + "|次回予告|次回[\\s\\u3000:：、・「『]|予告[\\s\\u3000:：「『]"
+            + "|下[一]?[集回][预預]告|다음\\s*화\\s*예고|다음\\s*이야기"
+            + ")");
+
+    /** Standalone short header/title-card triggers (must be <= 4 words on their line). */
+    private static final Pattern SUB_PREVIEW_HEADER = Pattern.compile(
+            "(?iu)^(?:next\\s+episode|preview|prochain\\s+[e\\u00E9]pisode|apercu|aper\\u00E7u"
+            + "|vorschau|pr[o\\u00F3]ximo\\s+episodio|adelanto|pr[o\\u00F3]ximo\\s+epis[o\\u00F3]dio"
+            + "|prossimo\\s+episodio|anteprima|превью|анонс|zapowied[z\\u017A]|次回予告|次回|予告|下集预告|下集預告|예고)$");
+
+    /** Top-screen ASS positioning or episode-number title card immediately preceding the voiceover. */
+    private static final Pattern SUB_TITLE_CARD = Pattern.compile(
+            "(?iu)(?:\\{\\\\an[789]\\}|\\{\\\\pos\\(|^(?:episode\\s+\\d+|第[0-9０-９一二三四五六七八九十百]+話)\\b)");
+
+    private static final Pattern SRT_VTT_TIME = Pattern.compile(
+            "(?:(\\d{1,2}):)?(\\d{2}):(\\d{2})[,.](\\d{3})\\s*-->\\s*(?:(\\d{1,2}):)?(\\d{2}):(\\d{2})[,.](\\d{3})");
+
+    private static final class TimedCue {
+        final double startSec;
+        final double endSec;
+        final String rawText;
+
+        TimedCue(double startSec, double endSec, String rawText) {
+            this.startSec = startSec;
+            this.endSec = endSec;
+            this.rawText = rawText;
+        }
+    }
+
+    /** True when a single cue text matches preview boilerplate and passes false-positive guards. */
+    static boolean isPreviewBoilerplateCue(String rawCue) {
+        if (rawCue == null || rawCue.isEmpty()) return false;
+        if (rawCue.indexOf('\u266A') >= 0 || rawCue.indexOf('\u266B') >= 0) return false;
+        String noTags = rawCue.replaceAll("\\{\\\\[^}]*\\}", "")
+                .replaceAll("</?[a-zA-Z][^>]*>", "")
+                .replace('\r', '\n').trim();
+        if (noTags.isEmpty() || noTags.startsWith("#")) return false;
+        String[] cueLines = noTags.split("\n");
+        for (int i = 0; i < cueLines.length; i++) {
+            String line = cueLines[i].trim();
+            if (line.isEmpty()) continue;
+            line = line.replaceFirst("^(?:[-\\u2013]\\s*)?(?:\\[[A-Z0-9 ]{2,20}\\]|[A-Z0-9 ]{2,20}:)\\s*", "").trim();
+            if (line.isEmpty()) continue;
+            if (SUB_PREVIEW_PREFIX.matcher(line).find()) {
+                if (line.endsWith("?") && !line.toLowerCase(Locale.ROOT).startsWith("next time on")) {
+                    continue;
+                }
+                return true;
+            }
+            String cleanHeader = line.replaceAll("^[\\s\"'\\u201C\\u201D\\u300C\\u300E\\(\\[:\\-]+|[\\s\"'\\u201C\\u201D\\u300D\\u300F\\)\\]:\\-.!]+$", "");
+            if (SUB_PREVIEW_HEADER.matcher(cleanHeader).matches()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Parses SRT/VTT text into timed cues and finds the preview start timestamp.
+     * Anchored strictly to >= creditsEndSec - 3.0s (when credits exist) and within the last 90s of runtime.
+     */
+    static double detectPreviewStartFromSubText(String body, double creditsEndSec, double runtimeSec) {
+        if (body == null || body.isEmpty() || runtimeSec < 300.0) return -1.0;
+        double minStart = creditsEndSec > 0
+                ? Math.max(creditsEndSec - 3.0, runtimeSec - 90.0)
+                : runtimeSec - 60.0;
+        double maxStart = runtimeSec - 3.0;
+        if (minStart >= maxStart) return -1.0;
+
+        List<TimedCue> tailCues = new ArrayList<>();
+        String norm = body.replace("\r\n", "\n").replace('\r', '\n');
+        String[] blocks = norm.split("\n[ \\t\\u00A0]*\n");
+        for (int b = 0; b < blocks.length; b++) {
+            String block = blocks[b].trim();
+            if (block.isEmpty()) continue;
+            String[] blockLines = block.split("\n");
+            int timeIdx = -1;
+            Matcher tm = null;
+            for (int i = 0; i < blockLines.length && i < 3; i++) {
+                Matcher m = SRT_VTT_TIME.matcher(blockLines[i]);
+                if (m.find()) {
+                    timeIdx = i;
+                    tm = m;
+                    break;
+                }
+            }
+            if (tm == null) continue;
+            double start = parseHmsMs(tm.group(1), tm.group(2), tm.group(3), tm.group(4));
+            double end = parseHmsMs(tm.group(5), tm.group(6), tm.group(7), tm.group(8));
+            if (start < minStart - 5.0 || start > maxStart) continue;
+            StringBuilder text = new StringBuilder();
+            for (int i = timeIdx + 1; i < blockLines.length; i++) {
+                String l = blockLines[i].trim();
+                if (l.isEmpty()) continue;
+                if (text.length() > 0) text.append('\n');
+                text.append(l);
+            }
+            if (text.length() > 0) {
+                tailCues.add(new TimedCue(start, end, text.toString()));
+            }
+        }
+
+        for (int i = 0; i < tailCues.size(); i++) {
+            TimedCue cue = tailCues.get(i);
+            if (cue.startSec < minStart) continue;
+            if (!isPreviewBoilerplateCue(cue.rawText)) continue;
+            if (creditsEndSec > 0 && cue.startSec >= creditsEndSec - 1.5
+                    && cue.startSec - creditsEndSec <= 5.0) {
+                return creditsEndSec;
+            }
+            if (i > 0) {
+                TimedCue prevCue = tailCues.get(i - 1);
+                if (prevCue.startSec >= minStart && cue.startSec - prevCue.startSec <= 3.5
+                        && SUB_TITLE_CARD.matcher(prevCue.rawText).find()) {
+                    return Math.max(minStart, prevCue.startSec - 0.2);
+                }
+            }
+            double floor = i > 0 ? Math.max(minStart, tailCues.get(i - 1).endSec) : minStart;
+            return Math.max(floor, cue.startSec - 0.4);
+        }
+        return -1.0;
+    }
+
+    private static double parseHmsMs(String h, String m, String s, String ms) {
+        return parseNumOrZero(h) * 3600.0 + parseNumOrZero(m) * 60.0
+                + parseNumOrZero(s) + parseNumOrZero(ms) / 1000.0;
+    }
+
+    private static int parseNumOrZero(String v) {
+        try {
+            if (v == null || v.isEmpty()) return 0;
+            return Integer.parseInt(v.trim());
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    /**
+     * Fetches the tail of an external .srt/.vtt URL: requests Range: bytes=-49152 first;
+     * if the server returns 200 OK, keeps only a 48 KB rolling tail buffer
+     * (capped at 512 KB total read) so memory and bandwidth stay minimal.
+     */
+    static String fetchSubtitleTail(String url) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", "Stremio");
+            conn.setRequestProperty("Range", "bytes=-49152");
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) return null;
+            InputStream in = conn.getInputStream();
+            if (in == null) return null;
+            final int keepBytes = 49152;
+            final int maxReadBytes = 524288;
+            byte[] ring = new byte[keepBytes];
+            int ringLen = 0;
+            int totalRead = 0;
+            byte[] buf = new byte[8192];
+            int n;
+            try {
+                while ((n = in.read(buf)) != -1) {
+                    totalRead += n;
+                    if (n >= keepBytes) {
+                        System.arraycopy(buf, n - keepBytes, ring, 0, keepBytes);
+                        ringLen = keepBytes;
+                    } else if (ringLen + n <= keepBytes) {
+                        System.arraycopy(buf, 0, ring, ringLen, n);
+                        ringLen += n;
+                    } else {
+                        int shift = (ringLen + n) - keepBytes;
+                        System.arraycopy(ring, shift, ring, 0, ringLen - shift);
+                        System.arraycopy(buf, 0, ring, ringLen - shift, n);
+                        ringLen = keepBytes;
+                    }
+                    if (totalRead >= maxReadBytes) break;
+                }
+            } finally {
+                try { in.close(); } catch (Throwable ignored) {}
+            }
+            if (ringLen <= 0) return null;
+            return new String(ring, 0, ringLen, StandardCharsets.UTF_8);
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            if (conn != null) {
+                try { conn.disconnect(); } catch (Throwable ignored) {}
+            }
+        }
+    }
 
     /** Chapters whose NAME says opening/intro/recap/credits/preview: their exact start/end. */
     private static List<Segment> chapterSegments(List<MkvChapters.Chapter> chapters, boolean weak,
